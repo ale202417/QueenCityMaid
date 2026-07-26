@@ -1,0 +1,43 @@
+{
+  "name": "queen-city-maid-operations",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5180",
+    "dev:api": "node --watch src/server/server.js",
+    "dev:api:memory": "node --watch src/server/dev-server.js",
+    "server": "node --env-file-if-exists=.env src/server/server.js",
+    "db:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/local-db.ps1 start",
+    "db:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/local-db.ps1 stop",
+    "db:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/local-db.ps1 status",
+    "db:backup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-db.ps1",
+    "db:verify-backup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/verify-backup.ps1",
+    "db:schedule-backups": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-backup-task.ps1",
+    "db:harden-files": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/harden-local-files.ps1",
+    "security:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/security-status.ps1",
+    "check:production-env": "node scripts/check-production-env.mjs",
+    "smoke:production": "node scripts/production-smoke.mjs",
+    "bootstrap:admin": "node --env-file-if-exists=.env src/server/bootstrap-admin.js",
+    "build": "vite build",
+    "test": "node --test",
+    "migrate": "node --env-file-if-exists=.env src/server/migrate.js",
+    "seed": "node --env-file-if-exists=.env src/server/seed.js"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "express": "^5.2.1",
+    "pg": "^8.13.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "twilio": "^6.0.2",
+    "vite": "^6.0.7",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "pg-mem": "^3.0.5"
+  }
+}
