@@ -16,7 +16,7 @@ async function fixture(role = "manager") {
   const pool = await testPool();
   const ids = Object.fromEntries([
     "organizationA", "organizationB", "managerA", "managerB", "customerA", "customerB",
-    "propertyA", "propertyB", "serviceA", "serviceB", "teamA"
+    "propertyA", "propertyB", "serviceA", "serviceAlternative", "serviceB", "teamA"
   ].map(key => [key, crypto.randomUUID()]));
 
   await pool.query(
@@ -58,8 +58,12 @@ async function fixture(role = "manager") {
     `INSERT INTO service_types (id, organization_id, name, category)
      VALUES
        ($1, $2, 'Regular Cleaning', 'residential'),
-       ($3, $4, 'Other Cleaning', 'residential')`,
-    [ids.serviceA, ids.organizationA, ids.serviceB, ids.organizationB]
+       ($3, $2, 'Deep Cleaning', 'residential'),
+       ($4, $5, 'Other Cleaning', 'residential')`,
+    [
+      ids.serviceA, ids.organizationA, ids.serviceAlternative,
+      ids.serviceB, ids.organizationB
+    ]
   );
   await pool.query(
     "INSERT INTO teams (id, organization_id, name) VALUES ($1, $2, 'Team One')",
@@ -279,7 +283,7 @@ describe("sales API", () => {
     const bookingEdited = await request(`/api/bookings/${bookingId}`, {
       method: "PATCH",
       body: {
-        serviceTypeId: ids.serviceA,
+        serviceTypeId: ids.serviceAlternative,
         expectedDurationMinutes: 210,
         priceCents: 20500,
         billingType: "flat",
@@ -288,8 +292,11 @@ describe("sales API", () => {
       }
     });
     assert.equal(bookingEdited.response.status, 200);
+    assert.equal(bookingEdited.body.data.booking.serviceTypeId, ids.serviceAlternative);
     assert.equal(bookingEdited.body.data.booking.expectedDurationMinutes, 210);
     assert.equal(bookingEdited.body.data.booking.specialRequests, "Use the side entrance");
+    const recurringAfterEdit = await request(`/api/recurring-services/${recurringId}`);
+    assert.equal(recurringAfterEdit.body.data.recurringService.serviceTypeId, ids.serviceA);
     const bookingCompleted = await request(`/api/bookings/${bookingId}`, {
       method: "PATCH",
       body: { status: "completed", actualDurationMinutes: 175 }

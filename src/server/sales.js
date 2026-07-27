@@ -279,7 +279,12 @@ async function requireManager(client, userId, organizationId) {
   if (!result.rowCount) throw new HttpError(404, "not_found", "Lead owner not found");
 }
 
-async function requireSalesReferences(client, organizationId, input) {
+async function requireSalesReferences(
+  client,
+  organizationId,
+  input,
+  { allowRecurringServiceTypeOverride = false } = {}
+) {
   await requireCustomerProperty(client, input.customerId, input.propertyId, organizationId);
   if (input.serviceTypeId) {
     await owned(client, "service_types", input.serviceTypeId, organizationId, "Service type");
@@ -298,6 +303,7 @@ async function requireSalesReferences(client, organizationId, input) {
       );
     }
     if (table === "recurring_services"
+      && !allowRecurringServiceTypeOverride
       && input.serviceTypeId && reference.service_type_id !== input.serviceTypeId) {
       throw new HttpError(
         400, "invalid_reference", "Recurring service uses a different service type"
@@ -1066,7 +1072,9 @@ function bookingRoutes(router, pool) {
         billingRateCents: input.billingRateCents !== undefined
           ? input.billingRateCents : before.billing_rate_cents
       };
-      await requireSalesReferences(client, req.auth.organizationId, merged);
+      await requireSalesReferences(client, req.auth.organizationId, merged, {
+        allowRecurringServiceTypeOverride: true
+      });
       if (merged.billingType === "hourly" && merged.billingRateCents == null) {
         throw new HttpError(400, "validation_error", "Hourly services require an hourly rate");
       }

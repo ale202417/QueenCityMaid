@@ -34,6 +34,7 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 26 | Production service defaults and reliable customer/property saves | 25 | done |
 | 27 | Cross-page save reliability, transaction safety, and page crash recovery | 26 | done |
 | 28 | Server-side record pagination and search, property archiving, and scheduled-service editing | 27 | done |
+| 29 | Recurring booking service-type override for an individual scheduled visit | 28 | done |
 
 ## Decisions
 
@@ -137,6 +138,8 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 - Server-side lead, customer, property, and employee search and pagination,
   1,020-customer scale coverage, archived property removal, searchable schedule
   selectors, and scheduled-service editing browser verification: passing.
+- Individual recurring-booking service-type changes preserve the future
+  recurring plan and pass reference, permission, and regression tests.
 
 ## Definition of Done
 

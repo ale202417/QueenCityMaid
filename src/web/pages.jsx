@@ -2145,7 +2145,11 @@ function SchedulePage() {
         </Modal>
       )}
       {modal?.type === "edit-booking" && (
-        <Modal title={`Edit service - ${modal.booking.customerName}`} onClose={() => setModal(null)}>
+        <Modal
+          title={`Edit service - ${modal.booking.customerName}`}
+          description="Changes apply to this scheduled visit only."
+          onClose={() => setModal(null)}
+        >
           <EditBookingForm
             booking={modal.booking}
             serviceTypes={referenceData.data?.serviceTypes || []}
