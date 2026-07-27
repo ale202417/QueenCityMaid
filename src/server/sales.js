@@ -175,7 +175,9 @@ const bookingFields = z.object({
 }).strict();
 
 const bookingCreate = bookingFields.superRefine(validateBooking);
-const bookingUpdate = bookingFields.partial().refine(value => Object.keys(value).length > 0, {
+const bookingUpdate = bookingFields.partial().extend({
+  updateScope: z.enum(["single", "future"]).optional()
+}).strict().refine(value => Object.keys(value).some(key => key !== "updateScope"), {
   message: "At least one field is required"
 }).superRefine(validateBooking);
 
@@ -1057,8 +1059,30 @@ function bookingRoutes(router, pool) {
   router.patch("/bookings/:id", asyncRoute(async (req, res) => {
     const id = idParam(req);
     const input = validate(bookingUpdate, req.body);
-    const booking = await transaction(pool, async client => {
+    const updated = await transaction(pool, async client => {
       const before = await owned(client, "bookings", id, req.auth.organizationId, "Booking");
+      const updateScope = input.updateScope || "single";
+      const futureDetailKeys = new Set([
+        "updateScope", "serviceTypeId", "expectedDurationMinutes", "priceCents",
+        "billingType", "billingRateCents", "specialRequests"
+      ]);
+      if (updateScope === "future"
+        && Object.keys(input).some(key => !futureDetailKeys.has(key))) {
+        throw new HttpError(
+          400, "validation_error", "Future updates can only change service details"
+        );
+      }
+      if (updateScope === "future" && !before.recurring_service_id) {
+        throw new HttpError(
+          400, "validation_error", "This booking is not part of a recurring service"
+        );
+      }
+      if (updateScope === "future"
+        && !["requested", "confirmed", "assigned"].includes(before.status)) {
+        throw new HttpError(
+          409, "invalid_state", "Only upcoming recurring services can update future visits"
+        );
+      }
       const merged = {
         customerId: input.customerId || before.customer_id,
         propertyId: input.propertyId || before.property_id,
@@ -1107,7 +1131,7 @@ function bookingRoutes(router, pool) {
         cancellationWaiverReason: "cancellation_waiver_reason",
         previousBookingId: "previous_booking_id"
       };
-      const entries = Object.entries(input);
+      const entries = Object.entries(input).filter(([key]) => key !== "updateScope");
       const values = entries.map(([, value]) => value);
       const sets = entries.map(([key], index) => `${columns[key]} = $${index + 1}`);
       if (input.scheduledStart) {
@@ -1130,9 +1154,76 @@ function bookingRoutes(router, pool) {
         entityType: "booking", entityId: id, action: "update",
         before: apiRow(before), after: apiRow(result.rows[0])
       });
-      return result.rows[0];
+      let futureBookingsUpdated = 0;
+      if (updateScope === "future") {
+        const effectiveOn = databaseDateOnly(before.service_date || before.scheduled_start);
+        const recurringBefore = await owned(
+          client,
+          "recurring_services",
+          before.recurring_service_id,
+          req.auth.organizationId,
+          "Recurring service"
+        );
+        const details = {
+          serviceTypeId: input.serviceTypeId || before.service_type_id,
+          expectedDurationMinutes: input.expectedDurationMinutes
+            ?? before.expected_duration_minutes,
+          priceCents: input.priceCents ?? before.price_cents,
+          billingType: input.billingType || before.billing_type,
+          billingRateCents: input.billingRateCents !== undefined
+            ? input.billingRateCents : before.billing_rate_cents,
+          specialRequests: input.specialRequests !== undefined
+            ? input.specialRequests : before.special_requests
+        };
+        const recurringResult = await client.query(
+          `UPDATE recurring_services
+           SET service_type_id = $1, expected_duration_minutes = $2,
+               price_cents = $3, billing_type = $4, billing_rate_cents = $5,
+               special_instructions = $6, updated_at = now()
+           WHERE id = $7 AND organization_id = $8
+           RETURNING *`,
+          [
+            details.serviceTypeId, details.expectedDurationMinutes, details.priceCents,
+            details.billingType, details.billingRateCents, details.specialRequests,
+            before.recurring_service_id, req.auth.organizationId
+          ]
+        );
+        const futureResult = await client.query(
+          `UPDATE bookings
+           SET service_type_id = $1, expected_duration_minutes = $2,
+               price_cents = $3, billing_type = $4, billing_rate_cents = $5,
+               special_requests = $6, updated_at = now()
+           WHERE organization_id = $7 AND recurring_service_id = $8 AND id <> $9
+             AND COALESCE(service_date, CAST(scheduled_start AS date))
+                 >= $10
+             AND status IN ('requested', 'confirmed', 'assigned')
+           RETURNING id`,
+          [
+            details.serviceTypeId, details.expectedDurationMinutes, details.priceCents,
+            details.billingType, details.billingRateCents, details.specialRequests,
+            req.auth.organizationId, before.recurring_service_id, id,
+            effectiveOn
+          ]
+        );
+        futureBookingsUpdated = futureResult.rowCount + 1;
+        await recordAudit(client, req.auth, {
+          entityType: "recurringService",
+          entityId: before.recurring_service_id,
+          action: "update_future_services",
+          before: apiRow(recurringBefore),
+          after: {
+            ...apiRow(recurringResult.rows[0]),
+            effectiveOn,
+            futureBookingsUpdated
+          }
+        });
+      }
+      return { booking: result.rows[0], futureBookingsUpdated };
     });
-    data(res, { booking: apiRow(booking) });
+    data(res, {
+      booking: apiRow(updated.booking),
+      futureBookingsUpdated: updated.futureBookingsUpdated
+    });
   }));
 }
 

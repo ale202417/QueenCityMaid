@@ -2147,14 +2147,18 @@ function SchedulePage() {
       {modal?.type === "edit-booking" && (
         <Modal
           title={`Edit service - ${modal.booking.customerName}`}
-          description="Changes apply to this scheduled visit only."
+          description={modal.booking.recurringServiceId
+            ? "Choose whether to update one visit or the recurring service."
+            : "Changes apply to this scheduled visit only."}
           onClose={() => setModal(null)}
         >
           <EditBookingForm
             booking={modal.booking}
             serviceTypes={referenceData.data?.serviceTypes || []}
             onCancel={() => setModal(null)}
-            onSaved={() => changed("Scheduled service updated.")}
+            onSaved={(scope) => changed(scope === "future"
+              ? "Recurring service and future visits updated."
+              : "Scheduled service updated.")}
           />
         </Modal>
       )}
@@ -2680,6 +2684,7 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
 
 function EditBookingForm({ booking, serviceTypes, onCancel, onSaved }) {
   const [form, setForm] = useState({
+    updateScope: "single",
     serviceTypeId: booking.serviceTypeId || "",
     expectedDurationMinutes: booking.expectedDurationMinutes || 150,
     billingType: booking.billingType || "flat",
@@ -2698,6 +2703,7 @@ function EditBookingForm({ booking, serviceTypes, onCancel, onSaved }) {
     const rate = cents(form.amount);
     try {
       await api.patch(`/bookings/${booking.id}`, {
+        updateScope: form.updateScope,
         serviceTypeId: form.serviceTypeId,
         expectedDurationMinutes: Number(form.expectedDurationMinutes),
         priceCents: form.billingType === "hourly"
@@ -2707,7 +2713,7 @@ function EditBookingForm({ booking, serviceTypes, onCancel, onSaved }) {
         billingRateCents: form.billingType === "hourly" ? rate : null,
         specialRequests: form.specialRequests
       });
-      onSaved();
+      onSaved(form.updateScope);
     } catch (requestError) {
       setError(errorMessage(requestError));
     } finally {
@@ -2717,6 +2723,17 @@ function EditBookingForm({ booking, serviceTypes, onCancel, onSaved }) {
 
   return (
     <form className="modal-form" onSubmit={submit}>
+      {booking.recurringServiceId && (
+        <Field label="Apply changes to">
+          <select
+            value={form.updateScope}
+            onChange={(event) => setForm({ ...form, updateScope: event.target.value })}
+          >
+            <option value="single">This visit only</option>
+            <option value="future">This and future visits</option>
+          </select>
+        </Field>
+      )}
       <div className="form-grid">
         <Field label="Service">
           <select required value={form.serviceTypeId} onChange={(event) => setForm({ ...form, serviceTypeId: event.target.value })}>

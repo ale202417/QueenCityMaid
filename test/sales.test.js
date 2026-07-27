@@ -316,6 +316,89 @@ describe("sales API", () => {
     assert.ok(audits.rows.some(event => event.action === "create"));
   });
 
+  it("updates a recurring plan and eligible future visits together", async () => {
+    const { pool, ids, request } = await fixture();
+    const recurringId = crypto.randomUUID();
+    const selectedId = crypto.randomUUID();
+    const futureId = crypto.randomUUID();
+    const completedId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO recurring_services
+       (id, organization_id, customer_id, property_id, service_type_id, status,
+        recurrence_rule, expected_duration_minutes, price_cents, billing_type,
+        billing_rate_cents, special_instructions, starts_on)
+       VALUES
+       ($1, $2, $3, $4, $5, 'active',
+        '{"type":"weekly","intervalWeeks":1}', 180, 18000, 'flat', NULL, '', '2026-08-03')`,
+      [
+        recurringId, ids.organizationA, ids.customerA, ids.propertyA, ids.serviceA
+      ]
+    );
+    await pool.query(
+      `INSERT INTO bookings
+       (id, organization_id, customer_id, property_id, service_type_id,
+        recurring_service_id, status, scheduled_start, service_date,
+        expected_duration_minutes, price_cents, billing_type, special_requests)
+       VALUES
+       ($1, $4, $5, $6, $7, $8, 'confirmed', '2026-08-03T12:00:00Z',
+        '2026-08-03', 180, 18000, 'flat', ''),
+       ($2, $4, $5, $6, $7, $8, 'assigned', '2026-08-10T12:00:00Z',
+        '2026-08-10', 180, 18000, 'flat', ''),
+       ($3, $4, $5, $6, $7, $8, 'completed', '2026-08-17T12:00:00Z',
+        '2026-08-17', 180, 18000, 'flat', '')`,
+      [
+        selectedId, futureId, completedId, ids.organizationA, ids.customerA,
+        ids.propertyA, ids.serviceA, recurringId
+      ]
+    );
+
+    const updated = await request(`/api/bookings/${selectedId}`, {
+      method: "PATCH",
+      body: {
+        updateScope: "future",
+        serviceTypeId: ids.serviceAlternative,
+        expectedDurationMinutes: 240,
+        priceCents: 30000,
+        billingType: "flat",
+        billingRateCents: null,
+        specialRequests: "Deep cleaning instructions"
+      }
+    });
+    assert.equal(updated.response.status, 200);
+    assert.equal(updated.body.data.futureBookingsUpdated, 2);
+
+    const recurring = await pool.query(
+      `SELECT service_type_id, expected_duration_minutes, price_cents
+       FROM recurring_services WHERE id = $1`,
+      [recurringId]
+    );
+    assert.equal(recurring.rows[0].service_type_id, ids.serviceAlternative);
+    assert.equal(recurring.rows[0].expected_duration_minutes, 240);
+    assert.equal(recurring.rows[0].price_cents, 30000);
+
+    const bookings = await pool.query(
+      `SELECT id, service_type_id, special_requests
+       FROM bookings WHERE recurring_service_id = $1 ORDER BY scheduled_start`,
+      [recurringId]
+    );
+    assert.equal(bookings.rows[0].service_type_id, ids.serviceAlternative);
+    assert.equal(bookings.rows[1].service_type_id, ids.serviceAlternative);
+    assert.equal(bookings.rows[1].special_requests, "Deep cleaning instructions");
+    assert.equal(bookings.rows[2].id, completedId);
+    assert.equal(bookings.rows[2].service_type_id, ids.serviceA);
+
+    const mixedUpdate = await request(`/api/bookings/${selectedId}`, {
+      method: "PATCH",
+      body: {
+        updateScope: "future",
+        recurringServiceId: null,
+        serviceTypeId: ids.serviceA
+      }
+    });
+    assert.equal(mixedUpdate.response.status, 400);
+    assert.equal(mixedUpdate.body.error.code, "validation_error");
+  });
+
   it("rejects invalid payloads and invalid state transitions", async () => {
     const { ids, request } = await fixture();
 
@@ -352,6 +435,30 @@ describe("sales API", () => {
     });
     assert.equal(invalidBooking.response.status, 400);
     assert.equal(invalidBooking.body.error.code, "validation_error");
+
+    const oneTimeBooking = await request("/api/bookings", {
+      method: "POST",
+      body: {
+        customerId: ids.customerA,
+        propertyId: ids.propertyA,
+        serviceTypeId: ids.serviceA,
+        scheduledStart: "2026-08-03T12:00:00.000Z",
+        expectedDurationMinutes: 120,
+        priceCents: 15000
+      }
+    });
+    const invalidFutureUpdate = await request(
+      `/api/bookings/${oneTimeBooking.body.data.booking.id}`,
+      {
+        method: "PATCH",
+        body: {
+          updateScope: "future",
+          serviceTypeId: ids.serviceAlternative
+        }
+      }
+    );
+    assert.equal(invalidFutureUpdate.response.status, 400);
+    assert.equal(invalidFutureUpdate.body.error.code, "validation_error");
   });
 
   it("hides records and references from other organizations", async () => {

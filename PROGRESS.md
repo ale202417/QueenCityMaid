@@ -35,6 +35,7 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 27 | Cross-page save reliability, transaction safety, and page crash recovery | 26 | done |
 | 28 | Server-side record pagination and search, property archiving, and scheduled-service editing | 27 | done |
 | 29 | Recurring booking service-type override for an individual scheduled visit | 28 | done |
+| 30 | Scoped recurring-service edits for one visit or all eligible future visits | 29 | done |
 
 ## Decisions
 
@@ -140,6 +141,8 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   selectors, and scheduled-service editing browser verification: passing.
 - Individual recurring-booking service-type changes preserve the future
   recurring plan and pass reference, permission, and regression tests.
+- Scoped recurring-service edits update the plan and eligible future visits in
+  one transaction while preserving completed and otherwise closed history.
 
 ## Definition of Done
 

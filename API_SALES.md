@@ -97,5 +97,12 @@ start. Waived cancellation fees require `cancellationWaiverReason`.
 Bookings may also include `billingType` and `billingRateCents`; hourly
 bookings require a rate.
 
+Booking updates may include `updateScope`. The default `single` updates only
+the selected booking. `future` requires a recurring booking and applies its
+service type, duration, pricing, billing, and instructions to the recurring
+plan plus requested, confirmed, or assigned visits from that date forward.
+Started, completed, cancelled, rescheduled, and unable-to-complete bookings
+remain unchanged.
+
 All creates, updates, quote sends/decisions, and nested writes are audited.
 Writes involving multiple records run in a database transaction.
