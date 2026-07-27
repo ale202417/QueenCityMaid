@@ -3,6 +3,7 @@ import { Router } from "express";
 import twilio from "twilio";
 import { z } from "zod";
 import { recordAudit, requireRole } from "./auth.js";
+import { withTransaction } from "./db.js";
 import { HttpError, asyncRoute, data, validate } from "./http.js";
 
 const uuid = z.string().uuid();
@@ -371,23 +372,25 @@ export function createCommunicationRouter({ pool, sender = createSmsSender() }) 
   router.post("/customers/:id/text-consent", asyncRoute(async (req, res) => {
     const customerId = validate(uuid, req.params.id);
     const input = validate(consentSchema, req.body);
-    const customer = await pool.query(
-      "SELECT id, phone FROM customers WHERE id = $1 AND organization_id = $2",
-      [customerId, req.auth.organizationId]
-    );
-    if (!customer.rowCount) throw new HttpError(404, "not_found", "Customer not found");
     const id = crypto.randomUUID();
-    await pool.query(
-      `INSERT INTO text_consents
-       (id, organization_id, customer_id, phone, status, source, recorded_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-      [
-        id, req.auth.organizationId, customerId, customer.rows[0].phone,
-        input.status, input.source, req.auth.id
-      ]
-    );
-    await recordAudit(pool, req.auth, {
-      entityType: "text_consent", entityId: id, action: input.status, after: input
+    await withTransaction(pool, async (client) => {
+      const customer = await client.query(
+        "SELECT id, phone FROM customers WHERE id = $1 AND organization_id = $2",
+        [customerId, req.auth.organizationId]
+      );
+      if (!customer.rowCount) throw new HttpError(404, "not_found", "Customer not found");
+      await client.query(
+        `INSERT INTO text_consents
+         (id, organization_id, customer_id, phone, status, source, recorded_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+        [
+          id, req.auth.organizationId, customerId, customer.rows[0].phone,
+          input.status, input.source, req.auth.id
+        ]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "text_consent", entityId: id, action: input.status, after: input
+      });
     });
     data(res, { consent: { id, customerId, ...input } }, 201);
   }));
@@ -452,22 +455,27 @@ export function createCommunicationRouter({ pool, sender = createSmsSender() }) 
   router.post("/customers/:id/messages", asyncRoute(async (req, res) => {
     const customerId = validate(uuid, req.params.id);
     const input = validate(directMessageSchema, req.body);
-    const customer = await consentedCustomer(pool, req.auth.organizationId, customerId);
     const dueAt = input.dueAt ? new Date(input.dueAt) : new Date();
-    const notification = await queueNotification(pool, {
-      organizationId: req.auth.organizationId,
-      customerId,
-      type: "manager_message",
-      destination: customer.phone,
-      body: input.body,
-      idempotencyKey: `manager-message:${crypto.randomUUID()}`,
-      dueAt
-    });
-    await recordAudit(pool, req.auth, {
-      entityType: "notification",
-      entityId: notification.id,
-      action: "queue",
-      after: { customerId, dueAt, type: "manager_message" }
+    const notification = await withTransaction(pool, async (client) => {
+      const customer = await consentedCustomer(
+        client, req.auth.organizationId, customerId
+      );
+      const queued = await queueNotification(client, {
+        organizationId: req.auth.organizationId,
+        customerId,
+        type: "manager_message",
+        destination: customer.phone,
+        body: input.body,
+        idempotencyKey: `manager-message:${crypto.randomUUID()}`,
+        dueAt
+      });
+      await recordAudit(client, req.auth, {
+        entityType: "notification",
+        entityId: queued.id,
+        action: "queue",
+        after: { customerId, dueAt, type: "manager_message" }
+      });
+      return queued;
     });
     data(res, { notification }, 201);
   }));

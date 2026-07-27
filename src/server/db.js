@@ -14,6 +14,21 @@ export function createMigrationPool() {
   return createPool(process.env.MIGRATION_DATABASE_URL || process.env.DATABASE_URL);
 }
 
+export async function withTransaction(pool, work) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await work(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function migrate(pool) {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (

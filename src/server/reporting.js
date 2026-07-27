@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { recordAudit, requireRole } from "./auth.js";
+import { withTransaction } from "./db.js";
 import { HttpError, asyncRoute, data, validate } from "./http.js";
 
 const uuid = z.string().uuid();
@@ -472,24 +473,27 @@ export function createReportingRouter({ pool }) {
   router.post("/expenses", asyncRoute(async (req, res) => {
     const input = validate(expenseSchema, req.body);
     const id = crypto.randomUUID();
-    const result = await pool.query(
-      `INSERT INTO business_expenses
-       (id, organization_id, spent_on, category, description, amount_cents, recorded_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING created_at`,
-      [
-        id, req.auth.organizationId, input.spentOn, input.category,
-        input.description, input.amountCents, req.auth.id
-      ]
-    );
-    await recordAudit(pool, req.auth, {
-      entityType: "business_expense",
-      entityId: id,
-      action: "create",
-      after: input
+    const createdAt = await withTransaction(pool, async (client) => {
+      const result = await client.query(
+        `INSERT INTO business_expenses
+         (id, organization_id, spent_on, category, description, amount_cents, recorded_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING created_at`,
+        [
+          id, req.auth.organizationId, input.spentOn, input.category,
+          input.description, input.amountCents, req.auth.id
+        ]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "business_expense",
+        entityId: id,
+        action: "create",
+        after: input
+      });
+      return result.rows[0].created_at;
     });
     data(res, {
-      expense: { id, ...input, createdAt: result.rows[0].created_at }
+      expense: { id, ...input, createdAt }
     }, 201);
   }));
 
@@ -504,30 +508,35 @@ export function createReportingRouter({ pool }) {
 
   router.patch("/settings", asyncRoute(async (req, res) => {
     const input = validate(settingsSchema, req.body);
-    const before = await pool.query(
-      "SELECT * FROM business_settings WHERE organization_id = $1",
-      [req.auth.organizationId]
-    );
-    if (!before.rowCount) throw new HttpError(404, "not_found", "Business settings not found");
-    const entries = Object.entries(input);
-    const values = entries.map(([, value]) => value);
-    values.push(req.auth.organizationId);
-    const result = await pool.query(
-      `UPDATE business_settings
-       SET ${entries.map(([key], index) => `${settingsColumns[key]} = $${index + 1}`).join(", ")},
-           updated_at = now()
-       WHERE organization_id = $${values.length}
-       RETURNING *`,
-      values
-    );
-    await recordAudit(pool, req.auth, {
-      entityType: "business_settings",
-      entityId: req.auth.organizationId,
-      action: "update",
-      before: apiSettings(before.rows[0]),
-      after: apiSettings(result.rows[0])
+    const settings = await withTransaction(pool, async (client) => {
+      const before = await client.query(
+        "SELECT * FROM business_settings WHERE organization_id = $1",
+        [req.auth.organizationId]
+      );
+      if (!before.rowCount) {
+        throw new HttpError(404, "not_found", "Business settings not found");
+      }
+      const entries = Object.entries(input);
+      const values = entries.map(([, value]) => value);
+      values.push(req.auth.organizationId);
+      const result = await client.query(
+        `UPDATE business_settings
+         SET ${entries.map(([key], index) => `${settingsColumns[key]} = $${index + 1}`).join(", ")},
+             updated_at = now()
+         WHERE organization_id = $${values.length}
+         RETURNING *`,
+        values
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "business_settings",
+        entityId: req.auth.organizationId,
+        action: "update",
+        before: apiSettings(before.rows[0]),
+        after: apiSettings(result.rows[0])
+      });
+      return apiSettings(result.rows[0]);
     });
-    data(res, { settings: apiSettings(result.rows[0]) });
+    data(res, { settings });
   }));
 
   return router;

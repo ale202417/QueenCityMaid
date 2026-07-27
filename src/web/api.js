@@ -9,14 +9,23 @@ export class ApiError extends Error {
 }
 
 async function request(path, options = {}) {
-  const response = await fetch(`/api${path}`, {
-    credentials: "include",
-    ...options,
-    headers: {
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...options.headers
+  let response;
+  try {
+    response = await fetch(`/api${path}`, {
+      credentials: "include",
+      ...options,
+      signal: options.signal || AbortSignal.timeout(30_000),
+      headers: {
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...options.headers
+      }
+    });
+  } catch (error) {
+    if (error.name === "TimeoutError") {
+      throw new ApiError("The server took too long to respond. Please try again.");
     }
-  });
+    throw error;
+  }
 
   const contentType = response.headers.get("content-type") || "";
   const body = contentType.includes("application/json") ? await response.json() : null;

@@ -11,6 +11,7 @@ import {
   requireRole
 } from "./auth.js";
 import { createAccountRouter } from "./accounts.js";
+import { withTransaction } from "./db.js";
 import { hashPassword, verifyPassword } from "./passwords.js";
 import { createCommunicationRouter } from "./communications.js";
 import { HttpError, asyncRoute, data, errorHandler, notFound, validate } from "./http.js";
@@ -166,23 +167,28 @@ export function createApp({ pool, secureCookies, staticDir } = {}) {
     }
 
     const auth = result.rows[0];
-    await pool.query("DELETE FROM login_attempts WHERE key_hash = $1", [attemptKey]);
-    const token = await createSession(pool, auth.id);
-    await recordAudit(pool, auth, {
-      entityType: "user",
-      entityId: auth.id,
-      action: "login"
+    const token = await withTransaction(pool, async (client) => {
+      await client.query("DELETE FROM login_attempts WHERE key_hash = $1", [attemptKey]);
+      const createdToken = await createSession(client, auth.id);
+      await recordAudit(client, auth, {
+        entityType: "user",
+        entityId: auth.id,
+        action: "login"
+      });
+      return createdToken;
     });
     res.cookie(SESSION_COOKIE, token, cookies);
     data(res, { user: publicUser(auth) });
   }));
 
   app.post("/api/auth/logout", sessionAuth, asyncRoute(async (req, res) => {
-    await destroySession(pool, req.sessionToken);
-    await recordAudit(pool, req.auth, {
-      entityType: "user",
-      entityId: req.auth.id,
-      action: "logout"
+    await withTransaction(pool, async (client) => {
+      await destroySession(client, req.sessionToken);
+      await recordAudit(client, req.auth, {
+        entityType: "user",
+        entityId: req.auth.id,
+        action: "logout"
+      });
     });
     res.clearCookie(SESSION_COOKIE, { ...cookies, maxAge: undefined });
     data(res, { loggedOut: true });
@@ -202,16 +208,18 @@ export function createApp({ pool, secureCookies, staticDir } = {}) {
       throw new HttpError(401, "invalid_password", "Current password is incorrect");
     }
     const passwordHash = await hashPassword(input.newPassword);
-    await pool.query(
-      "UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1",
-      [req.auth.id, passwordHash]
-    );
-    await pool.query(
-      "DELETE FROM sessions WHERE user_id = $1 AND id <> $2",
-      [req.auth.id, req.auth.sessionId]
-    );
-    await recordAudit(pool, req.auth, {
-      entityType: "user", entityId: req.auth.id, action: "change_password"
+    await withTransaction(pool, async (client) => {
+      await client.query(
+        "UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1",
+        [req.auth.id, passwordHash]
+      );
+      await client.query(
+        "DELETE FROM sessions WHERE user_id = $1 AND id <> $2",
+        [req.auth.id, req.auth.sessionId]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "user", entityId: req.auth.id, action: "change_password"
+      });
     });
     data(res, { changed: true });
   }));

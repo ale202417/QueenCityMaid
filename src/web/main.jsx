@@ -248,6 +248,39 @@ function UserBlock({ user, onLogout }) {
   );
 }
 
+class PageErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { failed: false };
+  }
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error) {
+    console.error(error);
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <section className="section-block">
+        <div className="status-panel" role="alert">
+          <div className="status-mark" aria-hidden="true" />
+          <div>
+            <strong>This page could not be displayed</strong>
+            <p>Reload the page to try again. Reloading will not delete saved information.</p>
+          </div>
+          <button className="text-button" type="button" onClick={() => window.location.reload()}>
+            Reload
+          </button>
+        </div>
+      </section>
+    );
+  }
+}
+
 function AppShell({ user }) {
   const auth = useAuth();
   const [path, navigate] = useHashRoute();
@@ -331,7 +364,9 @@ function AppShell({ user }) {
       )}
 
       <main id="main-content" className="main-content" tabIndex="-1">
-        <ProductPage path={permittedPath} user={user} />
+        <PageErrorBoundary key={permittedPath}>
+          <ProductPage path={permittedPath} user={user} />
+        </PageErrorBoundary>
       </main>
     </div>
   );

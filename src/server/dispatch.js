@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { recordAudit, requireRole } from "./auth.js";
+import { withTransaction } from "./db.js";
 import { HttpError, asyncRoute, data, validate } from "./http.js";
 
 const dateSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}$/);
@@ -43,21 +44,6 @@ const issueResolutionSchema = z.object({
   (value) => !value.customerApproved || (value.additionalChargeCents || 0) > 0,
   { message: "Approved extra work requires a positive charge", path: ["additionalChargeCents"] }
 );
-
-async function withTransaction(pool, work) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const result = await work(client);
-    await client.query("COMMIT");
-    return result;
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
-  }
-}
 
 async function employeeForUser(pool, auth) {
   const result = await pool.query(
@@ -214,13 +200,13 @@ export function createDispatchRouter({ pool }) {
           [stop.bookingId]
         );
       }
+      await recordAudit(client, req.auth, {
+        entityType: "route",
+        entityId: routeId,
+        action: "create",
+        after: input
+      });
       return { id: routeId, status: "draft" };
-    });
-    await recordAudit(pool, req.auth, {
-      entityType: "route",
-      entityId: route.id,
-      action: "create",
-      after: input
     });
     data(res, { route }, 201);
   }));
@@ -228,42 +214,48 @@ export function createDispatchRouter({ pool }) {
   router.patch("/routes/:id", requireRole("manager"), asyncRoute(async (req, res) => {
     const id = validate(uuid, req.params.id);
     const input = validate(routeUpdateSchema, req.body);
-    const result = await pool.query(
-      `UPDATE routes
-       SET estimated_paid_minutes = $3, estimated_finish_at = $4,
-           override_reason = $5, updated_at = now()
-       WHERE id = $1 AND organization_id = $2
-       RETURNING id, status, estimated_paid_minutes AS "estimatedPaidMinutes",
-                 estimated_finish_at AS "estimatedFinishAt", override_reason AS "overrideReason"`,
-      [
-        id, req.auth.organizationId, input.estimatedPaidMinutes,
-        input.estimatedFinishAt, input.overrideReason || null
-      ]
-    );
-    if (!result.rowCount) throw new HttpError(404, "not_found", "Route not found");
-    await recordAudit(pool, req.auth, {
-      entityType: "route", entityId: id, action: "update", after: input,
-      reason: input.overrideReason
+    const route = await withTransaction(pool, async (client) => {
+      const result = await client.query(
+        `UPDATE routes
+         SET estimated_paid_minutes = $3, estimated_finish_at = $4,
+             override_reason = $5, updated_at = now()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING id, status, estimated_paid_minutes AS "estimatedPaidMinutes",
+                   estimated_finish_at AS "estimatedFinishAt", override_reason AS "overrideReason"`,
+        [
+          id, req.auth.organizationId, input.estimatedPaidMinutes,
+          input.estimatedFinishAt, input.overrideReason || null
+        ]
+      );
+      if (!result.rowCount) throw new HttpError(404, "not_found", "Route not found");
+      await recordAudit(client, req.auth, {
+        entityType: "route", entityId: id, action: "update", after: input,
+        reason: input.overrideReason
+      });
+      return result.rows[0];
     });
-    data(res, { route: result.rows[0] });
+    data(res, { route });
   }));
 
   router.post("/routes/:id/finalize", requireRole("manager"), asyncRoute(async (req, res) => {
     const id = validate(uuid, req.params.id);
-    const result = await pool.query(
-      `UPDATE routes SET status = 'finalized', finalized_by = $3,
-              finalized_at = now(), updated_at = now()
-       WHERE id = $1 AND organization_id = $2 AND status = 'draft'
-       RETURNING id, status, finalized_at AS "finalizedAt"`,
-      [id, req.auth.organizationId, req.auth.id]
-    );
-    if (!result.rowCount) {
-      throw new HttpError(409, "route_not_draft", "Only a draft route can be finalized");
-    }
-    await recordAudit(pool, req.auth, {
-      entityType: "route", entityId: id, action: "finalize"
+    const route = await withTransaction(pool, async (client) => {
+      const result = await client.query(
+        `UPDATE routes SET status = 'finalized', finalized_by = $3,
+                finalized_at = now(), updated_at = now()
+         WHERE id = $1 AND organization_id = $2 AND status = 'draft'
+         RETURNING id, status, finalized_at AS "finalizedAt"`,
+        [id, req.auth.organizationId, req.auth.id]
+      );
+      if (!result.rowCount) {
+        throw new HttpError(409, "route_not_draft", "Only a draft route can be finalized");
+      }
+      await recordAudit(client, req.auth, {
+        entityType: "route", entityId: id, action: "finalize"
+      });
+      return result.rows[0];
     });
-    data(res, { route: result.rows[0] });
+    data(res, { route });
   }));
 
   router.get("/my-route", requireRole("cleaner"), asyncRoute(async (req, res) => {
@@ -415,34 +407,36 @@ export function createDispatchRouter({ pool }) {
     const bookingId = validate(uuid, req.params.id);
     const input = validate(issueSchema, req.body);
     const employeeId = await employeeForUser(pool, req.auth);
-    const booking = req.auth.role === "manager"
-      ? await pool.query(
-        "SELECT id FROM bookings WHERE id = $1 AND organization_id = $2",
-        [bookingId, req.auth.organizationId]
-      )
-      : await pool.query(
-        `SELECT b.id
-         FROM bookings b
-         JOIN job_assignments ja ON ja.booking_id = b.id
-         WHERE b.id = $1 AND b.organization_id = $2 AND ja.employee_id = $3`,
-        [bookingId, req.auth.organizationId, employeeId]
-      );
-    if (!booking.rowCount) throw new HttpError(404, "not_found", "Booking not found");
     const id = crypto.randomUUID();
-    await pool.query(
-      `INSERT INTO job_issues
-       (id, organization_id, booking_id, reported_by_employee_id, recorded_by_user_id,
-        type, description, customer_approved, additional_charge_cents)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-      [
-        id, req.auth.organizationId, bookingId, employeeId,
-        req.auth.role === "manager" ? req.auth.id : null,
-        input.type, input.description, input.customerApproved ?? null,
-        input.additionalChargeCents ?? null
-      ]
-    );
-    await recordAudit(pool, req.auth, {
-      entityType: "job_issue", entityId: id, action: "create", after: input
+    await withTransaction(pool, async (client) => {
+      const booking = req.auth.role === "manager"
+        ? await client.query(
+          "SELECT id FROM bookings WHERE id = $1 AND organization_id = $2",
+          [bookingId, req.auth.organizationId]
+        )
+        : await client.query(
+          `SELECT b.id
+           FROM bookings b
+           JOIN job_assignments ja ON ja.booking_id = b.id
+           WHERE b.id = $1 AND b.organization_id = $2 AND ja.employee_id = $3`,
+          [bookingId, req.auth.organizationId, employeeId]
+        );
+      if (!booking.rowCount) throw new HttpError(404, "not_found", "Booking not found");
+      await client.query(
+        `INSERT INTO job_issues
+         (id, organization_id, booking_id, reported_by_employee_id, recorded_by_user_id,
+          type, description, customer_approved, additional_charge_cents)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [
+          id, req.auth.organizationId, bookingId, employeeId,
+          req.auth.role === "manager" ? req.auth.id : null,
+          input.type, input.description, input.customerApproved ?? null,
+          input.additionalChargeCents ?? null
+        ]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "job_issue", entityId: id, action: "create", after: input
+      });
     });
     data(res, { issue: { id, ...input } }, 201);
   }));
@@ -450,26 +444,28 @@ export function createDispatchRouter({ pool }) {
   router.patch("/job-issues/:id", requireRole("manager"), asyncRoute(async (req, res) => {
     const id = validate(uuid, req.params.id);
     const input = validate(issueResolutionSchema, req.body);
-    const issue = await pool.query(
-      `SELECT ji.id, ji.booking_id AS "bookingId", ji.description,
-              b.customer_id AS "customerId", b.scheduled_start AS "scheduledStart"
-       FROM job_issues ji
-       JOIN bookings b ON b.id = ji.booking_id
-       WHERE ji.id = $1 AND ji.organization_id = $2 AND ji.resolved_at IS NULL`,
-      [id, req.auth.organizationId]
-    );
-    if (!issue.rowCount) throw new HttpError(404, "not_found", "Open job issue not found");
     await withTransaction(pool, async (client) => {
-      await client.query(
+      const issue = await client.query(
+        `SELECT ji.id, ji.booking_id AS "bookingId", ji.description,
+                b.customer_id AS "customerId", b.scheduled_start AS "scheduledStart"
+         FROM job_issues ji
+         JOIN bookings b ON b.id = ji.booking_id
+         WHERE ji.id = $1 AND ji.organization_id = $2 AND ji.resolved_at IS NULL`,
+        [id, req.auth.organizationId]
+      );
+      if (!issue.rowCount) throw new HttpError(404, "not_found", "Open job issue not found");
+      const updated = await client.query(
         `UPDATE job_issues
          SET customer_approved = $3, additional_charge_cents = $4, resolved_at = now(),
              description = description || $5
-         WHERE id = $1 AND organization_id = $2`,
+         WHERE id = $1 AND organization_id = $2 AND resolved_at IS NULL
+         RETURNING id`,
         [
           id, req.auth.organizationId, input.customerApproved,
           input.additionalChargeCents ?? null, `\nResolution: ${input.resolutionNotes}`
         ]
       );
+      if (!updated.rowCount) throw new HttpError(409, "already_resolved", "Job issue was already resolved");
       if (input.customerApproved && input.additionalChargeCents) {
         const existing = await client.query(
           `SELECT id FROM customer_charges
@@ -492,9 +488,9 @@ export function createDispatchRouter({ pool }) {
           );
         }
       }
-    });
-    await recordAudit(pool, req.auth, {
-      entityType: "job_issue", entityId: id, action: "resolve", after: input
+      await recordAudit(client, req.auth, {
+        entityType: "job_issue", entityId: id, action: "resolve", after: input
+      });
     });
     data(res, { issue: { id, resolved: true, ...input } });
   }));

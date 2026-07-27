@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { recordAudit, requireRole } from "./auth.js";
+import { withTransaction } from "./db.js";
 import { HttpError, asyncRoute, data, validate } from "./http.js";
 import { hashPassword } from "./passwords.js";
 
@@ -36,21 +37,6 @@ function publicUser(row) {
   };
 }
 
-async function transaction(pool, work) {
-  const client = await pool.connect();
-  try {
-    await client.query("BEGIN");
-    const value = await work(client);
-    await client.query("COMMIT");
-    return value;
-  } catch (error) {
-    await client.query("ROLLBACK");
-    throw error;
-  } finally {
-    client.release();
-  }
-}
-
 export function createAccountRouter({ pool }) {
   const router = Router();
   router.use(requireRole("manager"));
@@ -72,7 +58,7 @@ export function createAccountRouter({ pool }) {
     const input = validate(createSchema, req.body);
     const id = crypto.randomUUID();
     const passwordHash = await hashPassword(input.password);
-    const user = await transaction(pool, async (client) => {
+    const user = await withTransaction(pool, async (client) => {
       if (input.employeeId) {
         const employee = await client.query(
           `SELECT id, user_id AS "userId" FROM employees
@@ -130,36 +116,43 @@ export function createAccountRouter({ pool }) {
     const entries = Object.entries(input);
     const values = entries.map(([, value]) => value);
     values.push(id, req.auth.organizationId);
-    const result = await pool.query(
-      `UPDATE users SET
-       ${entries.map(([key], index) => `${key} = $${index + 1}`).join(", ")},
-       updated_at = now()
-       WHERE id = $${values.length - 1} AND organization_id = $${values.length}
-       RETURNING id, email, name, role, active, created_at AS "createdAt"`,
-      values
-    );
-    if (!result.rowCount) throw new HttpError(404, "not_found", "User not found");
-    if (input.active === false) await pool.query("DELETE FROM sessions WHERE user_id = $1", [id]);
-    await recordAudit(pool, req.auth, {
-      entityType: "user", entityId: id, action: "update", after: input
+    const user = await withTransaction(pool, async (client) => {
+      const result = await client.query(
+        `UPDATE users SET
+         ${entries.map(([key], index) => `${key} = $${index + 1}`).join(", ")},
+         updated_at = now()
+         WHERE id = $${values.length - 1} AND organization_id = $${values.length}
+         RETURNING id, email, name, role, active, created_at AS "createdAt"`,
+        values
+      );
+      if (!result.rowCount) throw new HttpError(404, "not_found", "User not found");
+      if (input.active === false) {
+        await client.query("DELETE FROM sessions WHERE user_id = $1", [id]);
+      }
+      await recordAudit(client, req.auth, {
+        entityType: "user", entityId: id, action: "update", after: input
+      });
+      return result.rows[0];
     });
-    data(res, { user: publicUser(result.rows[0]) });
+    data(res, { user: publicUser(user) });
   }));
 
   router.post("/users/:id/reset-password", asyncRoute(async (req, res) => {
     const id = validate(uuid, req.params.id);
     const input = validate(passwordSchema, req.body);
     const passwordHash = await hashPassword(input.password);
-    const result = await pool.query(
-      `UPDATE users SET password_hash = $3, updated_at = now()
-       WHERE id = $1 AND organization_id = $2
-       RETURNING id`,
-      [id, req.auth.organizationId, passwordHash]
-    );
-    if (!result.rowCount) throw new HttpError(404, "not_found", "User not found");
-    await pool.query("DELETE FROM sessions WHERE user_id = $1", [id]);
-    await recordAudit(pool, req.auth, {
-      entityType: "user", entityId: id, action: "reset_password"
+    await withTransaction(pool, async (client) => {
+      const result = await client.query(
+        `UPDATE users SET password_hash = $3, updated_at = now()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING id`,
+        [id, req.auth.organizationId, passwordHash]
+      );
+      if (!result.rowCount) throw new HttpError(404, "not_found", "User not found");
+      await client.query("DELETE FROM sessions WHERE user_id = $1", [id]);
+      await recordAudit(client, req.auth, {
+        entityType: "user", entityId: id, action: "reset_password"
+      });
     });
     data(res, { reset: true });
   }));

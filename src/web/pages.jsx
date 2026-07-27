@@ -31,22 +31,26 @@ export function ProductPage({ path, user }) {
 }
 
 function useLoad(loader, dependencies) {
-  const [state, setState] = useState({ status: "loading", data: null, error: "" });
+  const [state, setInternalState] = useState({ status: "loading", data: null, error: "" });
   const requestId = useRef(0);
   const load = useCallback(async () => {
     const currentRequest = ++requestId.current;
-    setState((current) => ({ ...current, status: "loading", error: "" }));
+    setInternalState((current) => ({ ...current, status: "loading", error: "" }));
     try {
       const result = await loader();
       if (currentRequest === requestId.current) {
-        setState({ status: "ready", data: result, error: "" });
+        setInternalState({ status: "ready", data: result, error: "" });
       }
     } catch (error) {
       if (currentRequest === requestId.current) {
-        setState({ status: "error", data: null, error: errorMessage(error) });
+        setInternalState({ status: "error", data: null, error: errorMessage(error) });
       }
     }
   }, dependencies);
+  const setState = useCallback((nextState) => {
+    requestId.current += 1;
+    setInternalState(nextState);
+  }, []);
 
   useEffect(() => {
     load();
@@ -305,7 +309,7 @@ function LeadsPage() {
   const [status, setStatus] = useState("");
   const [modal, setModal] = useState(null);
   const [notice, setNotice] = useState(null);
-  const resource = useLoad(() => api.get("/leads", { status }), [status]);
+  const resource = useLoad(() => api.get("/leads", { status, limit: 200 }), [status]);
   const leads = resource.data?.leads || [];
 
   return (
@@ -516,8 +520,8 @@ function LeadActivityManager({ lead, onClose, onSaved }) {
 function CustomersPage() {
   const resource = useLoad(async () => {
     const [customerData, propertyData] = await Promise.all([
-      api.list("customers"),
-      api.list("properties")
+      api.list("customers", { limit: 200 }),
+      api.list("properties", { limit: 200 })
     ]);
     return {
       customers: customerData.customers || [],
@@ -1348,9 +1352,9 @@ function EmployeesPage() {
   const [notice, setNotice] = useState(null);
   const resource = useLoad(async () => {
     const [employeeData, teamData, availabilityData] = await Promise.all([
-      api.list("employees"),
-      api.list("teams"),
-      api.list("availability-exceptions")
+      api.list("employees", { limit: 200 }),
+      api.list("teams", { limit: 200 }),
+      api.list("availability-exceptions", { limit: 200 })
     ]);
     return {
       employees: employeeData.employees || [],

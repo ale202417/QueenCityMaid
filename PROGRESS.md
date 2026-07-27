@@ -32,6 +32,7 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 24 | Daily payment decisions, financial reports, comparison analytics, and executive dashboard | 15, 17, 23 | done |
 | 25 | Managed hosting blueprint, CI release gate, clean production bootstrap, and deployment smoke checks | 24 | done |
 | 26 | Production service defaults and reliable customer/property saves | 25 | done |
+| 27 | Cross-page save reliability, transaction safety, and page crash recovery | 26 | done |
 
 ## Decisions
 
@@ -119,6 +120,9 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   passing.
 - Standard service initialization, stale-request rejection, and immediate
   customer/property save visibility with fake-data browser verification: passing.
+- Manual-state stale-request rejection, expanded operational list limits,
+  request timeouts, page error recovery, and atomic mutation/audit transactions:
+  passing.
 - Daily schedule ledger, flat and hourly payment decisions, immutable approved
   receipts, outstanding balances, account credits, customer standing, expenses,
   payroll/month/year reports, retention, period comparisons, dashboard metrics,
