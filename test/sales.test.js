@@ -144,6 +144,9 @@ describe("sales API", () => {
     const leads = await request("/api/leads?status=awaiting_information");
     assert.equal(leads.response.status, 200);
     assert.equal(leads.body.data.leads.length, 1);
+    assert.equal(leads.body.data.pagination.total, 1);
+    const searchedLeads = await request("/api/leads?q=Alice");
+    assert.equal(searchedLeads.body.data.leads[0].id, leadId);
 
     const quoteCreated = await request("/api/quotes", {
       method: "POST",
@@ -273,6 +276,20 @@ describe("sales API", () => {
     const bookingId = bookingCreated.body.data.booking.id;
     const bookingDetail = await request(`/api/bookings/${bookingId}`);
     assert.equal(bookingDetail.response.status, 200);
+    const bookingEdited = await request(`/api/bookings/${bookingId}`, {
+      method: "PATCH",
+      body: {
+        serviceTypeId: ids.serviceA,
+        expectedDurationMinutes: 210,
+        priceCents: 20500,
+        billingType: "flat",
+        billingRateCents: null,
+        specialRequests: "Use the side entrance"
+      }
+    });
+    assert.equal(bookingEdited.response.status, 200);
+    assert.equal(bookingEdited.body.data.booking.expectedDurationMinutes, 210);
+    assert.equal(bookingEdited.body.data.booking.specialRequests, "Use the side entrance");
     const bookingCompleted = await request(`/api/bookings/${bookingId}`, {
       method: "PATCH",
       body: { status: "completed", actualDurationMinutes: 175 }

@@ -1055,6 +1055,22 @@ textarea:hover {
   min-width: 160px;
 }
 
+.pagination {
+  display: flex;
+  margin-top: 18px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.pagination > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .date-control {
   width: auto;
   min-width: 154px;
@@ -1280,17 +1296,21 @@ textarea:hover {
 
 .time-block-row {
   display: grid;
-  min-width: 720px;
+  min-width: 820px;
   min-height: 78px;
   padding: 13px 14px;
   grid-template-columns:
     66px minmax(90px, 0.9fr) minmax(125px, 1.2fr) 62px 72px
-    minmax(110px, 1fr) 48px;
+    minmax(110px, 1fr) minmax(120px, 0.8fr);
   align-items: center;
   gap: 10px;
   color: #465149;
   border-bottom: 1px solid var(--border);
   font-size: 0.76rem;
+}
+
+.time-block-row .row-actions {
+  flex-wrap: wrap;
 }
 
 .time-block-row:last-child {
@@ -2552,6 +2572,20 @@ textarea:hover {
   .report-toolbar .inline-button {
     width: 100%;
     max-width: none;
+  }
+
+  .pagination,
+  .pagination > div {
+    width: 100%;
+  }
+
+  .pagination {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .pagination > div {
+    justify-content: space-between;
   }
 
   .data-table .data-row {

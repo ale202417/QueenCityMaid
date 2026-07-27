@@ -16,7 +16,7 @@ restricted to `req.auth.organizationId`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/leads` | List leads; filters: `status`, `ownerUserId`, `limit`, `offset` |
+| `GET` | `/leads` | List leads; filters: `q`, `status`, `ownerUserId`, `limit`, `offset`; includes pagination metadata |
 | `POST` | `/leads` | Intake a lead and calculate its response deadline |
 | `GET` | `/leads/:id` | Get a lead and its activity history |
 | `PATCH` | `/leads/:id` | Update ownership, contact details, status, or follow-up fields |

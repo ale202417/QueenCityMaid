@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ApiError, api, localDate } from "./api.js";
 
+const PAGE_SIZE = 50;
+
 export function ProductPage({ path, user }) {
   if (user.role === "cleaner") return <CleanerPage path={path} />;
 
@@ -66,6 +68,15 @@ function upsertById(items, item) {
   return [item, ...items.filter((current) => current.id !== item.id)];
 }
 
+function useDebouncedValue(value, delay = 300) {
+  const [debounced, setDebounced] = useState(value);
+  useEffect(() => {
+    const timeout = window.setTimeout(() => setDebounced(value), delay);
+    return () => window.clearTimeout(timeout);
+  }, [value, delay]);
+  return debounced;
+}
+
 function PageHeader({ eyebrow, title, description, children }) {
   return (
     <header className="page-header">
@@ -104,6 +115,38 @@ function StatePanel({ title, message, action }) {
       </div>
       {action}
     </div>
+  );
+}
+
+function Pagination({ pagination, onPageChange }) {
+  if (!pagination || pagination.total <= pagination.limit) return null;
+  const currentPage = Math.floor(pagination.offset / pagination.limit);
+  const totalPages = Math.ceil(pagination.total / pagination.limit);
+  const first = pagination.offset + 1;
+  const last = Math.min(pagination.offset + pagination.limit, pagination.total);
+  return (
+    <nav className="pagination" aria-label="Pagination">
+      <span>{first}-{last} of {pagination.total}</span>
+      <div>
+        <button
+          className="secondary-button compact-button"
+          disabled={currentPage === 0}
+          type="button"
+          onClick={() => onPageChange(currentPage - 1)}
+        >
+          Previous
+        </button>
+        <span>Page {currentPage + 1} of {totalPages}</span>
+        <button
+          className="secondary-button compact-button"
+          disabled={currentPage + 1 >= totalPages}
+          type="button"
+          onClick={() => onPageChange(currentPage + 1)}
+        >
+          Next
+        </button>
+      </div>
+    </nav>
   );
 }
 
@@ -307,9 +350,17 @@ function Metric({ label, value, warning = false }) {
 
 function LeadsPage() {
   const [status, setStatus] = useState("");
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(0);
   const [modal, setModal] = useState(null);
   const [notice, setNotice] = useState(null);
-  const resource = useLoad(() => api.get("/leads", { status, limit: 200 }), [status]);
+  const debouncedSearch = useDebouncedValue(search);
+  const resource = useLoad(() => api.get("/leads", {
+    status,
+    q: debouncedSearch,
+    limit: PAGE_SIZE,
+    offset: page * PAGE_SIZE
+  }), [status, debouncedSearch, page]);
   const leads = resource.data?.leads || [];
 
   return (
@@ -326,7 +377,25 @@ function LeadsPage() {
       <Notice notice={notice} onClose={() => setNotice(null)} />
       <section className="section-block">
         <div className="toolbar">
-          <select aria-label="Filter lead status" value={status} onChange={(event) => setStatus(event.target.value)}>
+          <input
+            aria-label="Search leads"
+            className="search-input"
+            placeholder="Search name, phone, or email"
+            type="search"
+            value={search}
+            onChange={(event) => {
+              setSearch(event.target.value);
+              setPage(0);
+            }}
+          />
+          <select
+            aria-label="Filter lead status"
+            value={status}
+            onChange={(event) => {
+              setStatus(event.target.value);
+              setPage(0);
+            }}
+          >
             <option value="">All statuses</option>
             {leadStatuses.map((value) => <option key={value} value={value}>{capitalize(value.replaceAll("_", " "))}</option>)}
           </select>
@@ -358,13 +427,21 @@ function LeadsPage() {
             })}
           </div>
         )}
+        <Pagination pagination={resource.data?.pagination} onPageChange={setPage} />
       </section>
       {modal?.type === "lead" && (
         <Modal title={modal.item ? "Edit lead" : "Add lead"} onClose={() => setModal(null)}>
           <LeadForm
             lead={modal.item}
             onCancel={() => setModal(null)}
-            onSaved={(message) => finishModal(message, setModal, setNotice, resource.reload)}
+            onSaved={(message) => {
+              setModal(null);
+              setNotice({ message });
+              setStatus("");
+              setSearch("");
+              setPage(0);
+              resource.reload();
+            }}
           />
         </Modal>
       )}
@@ -518,28 +595,19 @@ function LeadActivityManager({ lead, onClose, onSaved }) {
 }
 
 function CustomersPage() {
-  const resource = useLoad(async () => {
-    const [customerData, propertyData] = await Promise.all([
-      api.list("customers", { limit: 200 }),
-      api.list("properties", { limit: 200 })
-    ]);
-    return {
-      customers: customerData.customers || [],
-      properties: propertyData.properties || []
-    };
-  }, []);
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
+  const [page, setPage] = useState(0);
   const [modal, setModal] = useState(null);
   const [notice, setNotice] = useState(null);
+  const debouncedSearch = useDebouncedValue(search);
+  const resource = useLoad(() => api.list("customers", {
+    status,
+    q: debouncedSearch,
+    limit: PAGE_SIZE,
+    offset: page * PAGE_SIZE
+  }), [status, debouncedSearch, page]);
   const customers = resource.data?.customers || [];
-  const properties = resource.data?.properties || [];
-  const filtered = customers.filter((customer) => {
-    const matchesSearch = `${customer.name} ${customer.phone} ${customer.email || ""}`
-      .toLowerCase()
-      .includes(search.toLowerCase());
-    return matchesSearch && (!status || customer.status === status);
-  });
 
   async function paymentReminder(customer) {
     try {
@@ -571,9 +639,19 @@ function CustomersPage() {
             placeholder="Search name, phone, or email"
             type="search"
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => {
+              setSearch(event.target.value);
+              setPage(0);
+            }}
           />
-          <select aria-label="Filter customer status" value={status} onChange={(event) => setStatus(event.target.value)}>
+          <select
+            aria-label="Filter customer status"
+            value={status}
+            onChange={(event) => {
+              setStatus(event.target.value);
+              setPage(0);
+            }}
+          >
             <option value="">All statuses</option>
             <option value="active">Active</option>
             <option value="paused">Paused</option>
@@ -587,17 +665,15 @@ function CustomersPage() {
         {resource.status === "error" && (
           <StatePanel title="Customers unavailable" message={resource.error} action={<button className="text-button" onClick={resource.reload}>Try again</button>} />
         )}
-        {resource.status === "ready" && filtered.length === 0 && (
+        {resource.status === "ready" && customers.length === 0 && (
           <StatePanel title="No matching customers" message="Change the filters or add a customer record." />
         )}
-        {resource.status === "ready" && filtered.length > 0 && (
+        {resource.status === "ready" && customers.length > 0 && (
           <div className="data-table customer-table">
             <div className="data-row data-head">
               <span>Customer</span><span>Contact</span><span>Status</span><span>Preferences</span><span>Properties</span><span>Actions</span>
             </div>
-            {filtered.map((customer) => {
-              const customerProperties = properties.filter((property) => property.customerId === customer.id);
-              return (
+            {customers.map((customer) => (
                 <article className="data-row" key={customer.id}>
                   <div data-label="Customer">
                     <strong>{customer.name}</strong>
@@ -614,7 +690,7 @@ function CustomersPage() {
                   </div>
                   <div data-label="Properties">
                     <button className="text-button" type="button" onClick={() => setModal({ type: "properties", customer })}>
-                      {customerProperties.length} {customerProperties.length === 1 ? "property" : "properties"}
+                      {customer.propertyCount} {customer.propertyCount === 1 ? "property" : "properties"}
                     </button>
                   </div>
                   <div className="row-actions" data-label="Actions">
@@ -623,10 +699,10 @@ function CustomersPage() {
                     <button className="text-button" type="button" onClick={() => paymentReminder(customer)}>Payment reminder</button>
                   </div>
                 </article>
-              );
-            })}
+            ))}
           </div>
         )}
+        <Pagination pagination={resource.data?.pagination} onPageChange={setPage} />
       </section>
 
       {modal?.type === "customer" && (
@@ -637,14 +713,20 @@ function CustomersPage() {
             onSaved={(message, savedCustomer) => {
               setModal(null);
               setNotice({ message });
+              setStatus("");
+              setSearch(savedCustomer.name);
+              setPage(0);
               resource.setState((current) => {
-                const data = current.data || { customers: [], properties: [] };
+                const data = current.data || { customers: [], pagination: null };
                 return {
                   status: "ready",
                   error: "",
                   data: {
                     ...data,
-                    customers: upsertById(data.customers || [], savedCustomer)
+                    customers: upsertById(data.customers || [], {
+                      ...savedCustomer,
+                      propertyCount: savedCustomer.propertyCount || 0
+                    })
                   }
                 };
               });
@@ -655,21 +737,10 @@ function CustomersPage() {
       {modal?.type === "properties" && (
         <PropertyManager
           customer={modal.customer}
-          properties={properties.filter((property) => property.customerId === modal.customer.id)}
           onClose={() => setModal(null)}
-          onChanged={(message, savedProperty) => {
+          onChanged={(message) => {
             setNotice({ message });
-            resource.setState((current) => {
-              const data = current.data || { customers: [], properties: [] };
-              return {
-                status: "ready",
-                error: "",
-                data: {
-                  ...data,
-                  properties: upsertById(data.properties || [], savedProperty)
-                }
-              };
-            });
+            resource.reload();
           }}
         />
       )}
@@ -789,19 +860,67 @@ function CustomerForm({ customer, onCancel, onSaved }) {
   );
 }
 
-function PropertyManager({ customer, properties, onClose, onChanged }) {
+function PropertyManager({ customer, onClose, onChanged }) {
   const [editing, setEditing] = useState(null);
+  const [search, setSearch] = useState("");
+  const [page, setPage] = useState(0);
+  const [deletingId, setDeletingId] = useState("");
+  const [error, setError] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
+  const resource = useLoad(() => api.list("properties", {
+    customerId: customer.id,
+    active: true,
+    q: debouncedSearch,
+    limit: PAGE_SIZE,
+    offset: page * PAGE_SIZE
+  }), [customer.id, debouncedSearch, page]);
+  const properties = resource.data?.properties || [];
+
+  async function deleteProperty(property) {
+    if (!window.confirm(`Delete ${property.label || property.addressLine1}?`)) return;
+    setDeletingId(property.id);
+    setError("");
+    try {
+      await api.remove(`/properties/${property.id}`);
+      onChanged("Property deleted.");
+      if (properties.length === 1 && page > 0) {
+        setPage(page - 1);
+      } else {
+        resource.reload();
+      }
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setDeletingId("");
+    }
+  }
+
   return (
     <Modal title={`${customer.name} - Properties`} onClose={onClose}>
       {!editing && (
         <>
           <div className="modal-toolbar">
-            <p>{properties.length} {properties.length === 1 ? "property" : "properties"}</p>
+            <p>{resource.data?.pagination?.total || 0} properties</p>
             <button className="primary-button inline-button" type="button" onClick={() => setEditing({})}>Add property</button>
           </div>
-          {properties.length === 0 ? (
+          <input
+            aria-label="Search properties"
+            className="search-input"
+            placeholder="Search address, city, or postal code"
+            type="search"
+            value={search}
+            onChange={(event) => {
+              setSearch(event.target.value);
+              setPage(0);
+            }}
+          />
+          {resource.status === "loading" && <LoadingRows />}
+          {resource.status === "error" && (
+            <StatePanel title="Properties unavailable" message={resource.error} action={<button className="text-button" onClick={resource.reload}>Try again</button>} />
+          )}
+          {resource.status === "ready" && properties.length === 0 ? (
             <StatePanel title="No properties" message="Add the location where service will be performed." />
-          ) : (
+          ) : resource.status === "ready" ? (
             <div className="stack-list">
               {properties.map((property) => (
                 <article className="stack-row" key={property.id}>
@@ -810,11 +929,23 @@ function PropertyManager({ customer, properties, onClose, onChanged }) {
                     <p>{property.addressLine1}{property.addressLine2 ? `, ${property.addressLine2}` : ""}</p>
                     <small>{property.city}, {property.state} {property.postalCode}</small>
                   </div>
-                  <button className="text-button" type="button" onClick={() => setEditing(property)}>Edit</button>
+                  <div className="row-actions">
+                    <button className="text-button" type="button" onClick={() => setEditing(property)}>Edit</button>
+                    <button
+                      className="text-button danger-text"
+                      disabled={deletingId === property.id}
+                      type="button"
+                      onClick={() => deleteProperty(property)}
+                    >
+                      {deletingId === property.id ? "Deleting..." : "Delete"}
+                    </button>
+                  </div>
                 </article>
               ))}
             </div>
-          )}
+          ) : null}
+          <Pagination pagination={resource.data?.pagination} onPageChange={setPage} />
+          {error && <p className="form-error" role="alert">{error}</p>}
         </>
       )}
       {editing && (
@@ -825,6 +956,9 @@ function PropertyManager({ customer, properties, onClose, onChanged }) {
           onSaved={(message, savedProperty) => {
             setEditing(null);
             onChanged(message, savedProperty);
+            setSearch(savedProperty.addressLine1);
+            setPage(0);
+            resource.reload();
           }}
         />
       )}
@@ -1348,21 +1482,37 @@ function PaymentForm({ customerId, onCancel, onSaved }) {
 
 function EmployeesPage() {
   const [tab, setTab] = useState("employees");
+  const [employeeSearch, setEmployeeSearch] = useState("");
+  const [employeePage, setEmployeePage] = useState(0);
   const [modal, setModal] = useState(null);
   const [notice, setNotice] = useState(null);
+  const debouncedEmployeeSearch = useDebouncedValue(employeeSearch);
   const resource = useLoad(async () => {
-    const [employeeData, teamData, availabilityData] = await Promise.all([
-      api.list("employees", { limit: 200 }),
-      api.list("teams", { limit: 200 }),
-      api.list("availability-exceptions", { limit: 200 })
+    const [employeeData, activeEmployeeData, teamData, availabilityData] = await Promise.all([
+      api.list("employees", {
+        q: debouncedEmployeeSearch,
+        limit: PAGE_SIZE,
+        offset: employeePage * PAGE_SIZE
+      }),
+      api.list("employees", { active: true, limit: 100 }),
+      api.list("teams", { limit: 100 }),
+      api.list("availability-exceptions", { limit: 100 })
     ]);
     return {
       employees: employeeData.employees || [],
+      employeeOptions: activeEmployeeData.employees || [],
       teams: teamData.teams || [],
-      availability: availabilityData.availabilityExceptions || []
+      availability: availabilityData.availabilityExceptions || [],
+      pagination: employeeData.pagination
     };
-  }, []);
-  const data = resource.data || { employees: [], teams: [], availability: [] };
+  }, [debouncedEmployeeSearch, employeePage]);
+  const data = resource.data || {
+    employees: [],
+    employeeOptions: [],
+    teams: [],
+    availability: [],
+    pagination: null
+  };
 
   return (
     <>
@@ -1399,13 +1549,31 @@ function EmployeesPage() {
             </button>
           ))}
         </div>
+        {tab === "employees" && (
+          <div className="toolbar">
+            <input
+              aria-label="Search employees"
+              className="search-input"
+              placeholder="Search name or phone"
+              type="search"
+              value={employeeSearch}
+              onChange={(event) => {
+                setEmployeeSearch(event.target.value);
+                setEmployeePage(0);
+              }}
+            />
+          </div>
+        )}
 
         {resource.status === "loading" && <LoadingRows />}
         {resource.status === "error" && (
           <StatePanel title="Employee records unavailable" message={resource.error} action={<button className="text-button" onClick={resource.reload}>Try again</button>} />
         )}
         {resource.status === "ready" && tab === "employees" && (
-          <EmployeeList employees={data.employees} onEdit={(item) => setModal({ type: "employee", item })} />
+          <>
+            <EmployeeList employees={data.employees} onEdit={(item) => setModal({ type: "employee", item })} />
+            <Pagination pagination={data.pagination} onPageChange={setEmployeePage} />
+          </>
         )}
         {resource.status === "ready" && tab === "teams" && (
           <TeamList
@@ -1417,7 +1585,7 @@ function EmployeesPage() {
         {resource.status === "ready" && tab === "availability" && (
           <AvailabilityList
             availability={data.availability}
-            employees={data.employees}
+            employees={data.employeeOptions}
             onEdit={(item) => setModal({ type: "availability", item })}
           />
         )}
@@ -1445,7 +1613,7 @@ function EmployeesPage() {
         <Modal title={modal.item ? "Edit availability" : "Add availability"} onClose={() => setModal(null)}>
           <AvailabilityForm
             item={modal.item}
-            employees={data.employees}
+            employees={data.employeeOptions}
             onCancel={() => setModal(null)}
             onSaved={(message) => finishModal(message, setModal, setNotice, resource.reload)}
           />
@@ -1454,7 +1622,7 @@ function EmployeesPage() {
       {modal?.type === "members" && (
         <MemberManager
           team={modal.item}
-          employees={data.employees}
+          employees={data.employeeOptions}
           onClose={() => setModal(null)}
           onNotice={setNotice}
         />
@@ -1794,15 +1962,11 @@ function SchedulePage() {
   const [modal, setModal] = useState(null);
   const [notice, setNotice] = useState(null);
   const referenceData = useLoad(async () => {
-    const [customerData, propertyData, serviceData, teamData] = await Promise.all([
-      api.list("customers", { status: "active", limit: 200 }),
-      api.list("properties", { active: true, limit: 200 }),
-      api.list("service-types", { active: true, limit: 200 }),
-      api.list("teams", { active: true, limit: 200 })
+    const [serviceData, teamData] = await Promise.all([
+      api.list("service-types", { active: true, limit: 100 }),
+      api.list("teams", { active: true, limit: 100 })
     ]);
     return {
-      customers: customerData.customers || [],
-      properties: propertyData.properties || [],
       serviceTypes: serviceData.serviceTypes || [],
       teams: teamData.teams || []
     };
@@ -1924,6 +2088,7 @@ function SchedulePage() {
             selectedDay={selectedDay}
             teamId={teamId}
             onDayChange={setDayIndex}
+            onEdit={(booking) => setModal({ type: "edit-booking", booking })}
             onMove={(booking) => setModal({ type: "move", booking })}
             onTeamChange={setTeamId}
           />
@@ -1979,6 +2144,16 @@ function SchedulePage() {
           />
         </Modal>
       )}
+      {modal?.type === "edit-booking" && (
+        <Modal title={`Edit service - ${modal.booking.customerName}`} onClose={() => setModal(null)}>
+          <EditBookingForm
+            booking={modal.booking}
+            serviceTypes={referenceData.data?.serviceTypes || []}
+            onCancel={() => setModal(null)}
+            onSaved={() => changed("Scheduled service updated.")}
+          />
+        </Modal>
+      )}
       {modal?.type === "place" && (
         <Modal title={`Place ${modal.service.customerName}`} description={`This visit falls in Schedule ${modal.service.week}.`} onClose={() => setModal(null)}>
           <PlaceOtherForm
@@ -2001,6 +2176,7 @@ function WeeklySchedule({
   selectedDay,
   teamId,
   onDayChange,
+  onEdit,
   onMove,
   onTeamChange
 }) {
@@ -2052,14 +2228,14 @@ function WeeklySchedule({
         {crewTabs.length === 0 ? (
           <StatePanel title="No cleaning crews" message="Add an active team before assigning work." />
         ) : (
-          <TimeBlockSchedule bookings={crewBookings} onMove={onMove} />
+          <TimeBlockSchedule bookings={crewBookings} onEdit={onEdit} onMove={onMove} />
         )}
       </div>
     </div>
   );
 }
 
-function TimeBlockSchedule({ bookings, onMove }) {
+function TimeBlockSchedule({ bookings, onEdit, onMove }) {
   return (
     <div className="time-block-table">
       <div className="time-block-row time-block-head">
@@ -2091,10 +2267,13 @@ function TimeBlockSchedule({ bookings, onMove }) {
               {booking.billingType === "hourly" ? "/hr" : ""}
             </strong>
             <span data-label="Special instructions">{booking.specialInstructions || "None"}</span>
-            <div data-label="Actions">
-              {booking.canMove
-                ? <button className="text-button" type="button" onClick={() => onMove(booking)}>Move</button>
-                : <span className="muted">History</span>}
+            <div className="row-actions" data-label="Actions">
+              {booking.canMove ? (
+                <>
+                  <button className="text-button" type="button" onClick={() => onEdit(booking)}>Edit service</button>
+                  <button className="text-button" type="button" onClick={() => onMove(booking)}>Move</button>
+                </>
+              ) : <span className="muted">History</span>}
             </div>
           </article>
         ));
@@ -2161,13 +2340,94 @@ function ServiceHistory({ data, from, to, onFromChange, onToChange }) {
   );
 }
 
+function CustomerPropertyPicker({ customerId, propertyId, onChange }) {
+  const [customerSearch, setCustomerSearch] = useState("");
+  const [propertySearch, setPropertySearch] = useState("");
+  const debouncedCustomerSearch = useDebouncedValue(customerSearch);
+  const debouncedPropertySearch = useDebouncedValue(propertySearch);
+  const customers = useLoad(() => api.list("customers", {
+    status: "active",
+    q: debouncedCustomerSearch,
+    limit: 20
+  }), [debouncedCustomerSearch]);
+  const properties = useLoad(() => customerId
+    ? api.list("properties", {
+        customerId,
+        active: true,
+        q: debouncedPropertySearch,
+        limit: 20
+      })
+    : Promise.resolve({ properties: [], pagination: { total: 0, limit: 20, offset: 0 } }),
+  [customerId, debouncedPropertySearch]);
+
+  useEffect(() => {
+    const options = properties.data?.properties || [];
+    if (propertyId && !options.some((property) => property.id === propertyId)) return;
+    if (!propertyId && options.length === 1) {
+      onChange({ customerId, propertyId: options[0].id });
+    }
+  }, [customerId, propertyId, properties.data]);
+
+  return (
+    <>
+      <Field label="Find client">
+        <input
+          placeholder="Start typing a name, phone, or email"
+          type="search"
+          value={customerSearch}
+          onChange={(event) => setCustomerSearch(event.target.value)}
+        />
+      </Field>
+      <Field label="Client">
+        <select
+          required
+          value={customerId}
+          onChange={(event) => {
+            onChange({ customerId: event.target.value, propertyId: "" });
+            setPropertySearch("");
+          }}
+        >
+          <option value="">Select client</option>
+          {(customers.data?.customers || []).map((customer) => (
+            <option key={customer.id} value={customer.id}>{customer.name} - {customer.phone}</option>
+          ))}
+        </select>
+      </Field>
+      {customerId && (
+        <>
+          <Field label="Find property">
+            <input
+              placeholder="Start typing an address"
+              type="search"
+              value={propertySearch}
+              onChange={(event) => setPropertySearch(event.target.value)}
+            />
+          </Field>
+          <Field label="Property">
+            <select
+              required
+              value={propertyId}
+              onChange={(event) => onChange({ customerId, propertyId: event.target.value })}
+            >
+              <option value="">Select property</option>
+              {(properties.data?.properties || []).map((property) => (
+                <option key={property.id} value={property.id}>
+                  {property.addressLine1}, {property.city}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </>
+      )}
+    </>
+  );
+}
+
 function PlannerBookingForm({ data, initialDate, initialTeamId, onCancel, onSaved }) {
-  const customers = data?.customers || [];
-  const properties = data?.properties || [];
   const serviceTypes = data?.serviceTypes || [];
   const teams = data?.teams || [];
   const [form, setForm] = useState({
-    customerId: customers[0]?.id || "",
+    customerId: "",
     propertyId: "",
     serviceTypeId: serviceTypes[0]?.id || "",
     date: initialDate || localDate(),
@@ -2180,13 +2440,6 @@ function PlannerBookingForm({ data, initialDate, initialTeamId, onCancel, onSave
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const customerProperties = properties.filter((property) => property.customerId === form.customerId);
-
-  useEffect(() => {
-    if (!customerProperties.some((property) => property.id === form.propertyId)) {
-      setForm((current) => ({ ...current, propertyId: customerProperties[0]?.id || "" }));
-    }
-  }, [form.customerId, form.propertyId, customerProperties]);
 
   async function submit(event) {
     event.preventDefault();
@@ -2224,18 +2477,11 @@ function PlannerBookingForm({ data, initialDate, initialTeamId, onCancel, onSave
   return (
     <form className="modal-form" onSubmit={submit}>
       <div className="form-grid">
-        <Field label="Client">
-          <select required value={form.customerId} onChange={(event) => setForm({ ...form, customerId: event.target.value, propertyId: "" })}>
-            <option value="">Select client</option>
-            {customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Property">
-          <select required value={form.propertyId} onChange={(event) => setForm({ ...form, propertyId: event.target.value })}>
-            <option value="">Select property</option>
-            {customerProperties.map((property) => <option key={property.id} value={property.id}>{property.addressLine1}</option>)}
-          </select>
-        </Field>
+        <CustomerPropertyPicker
+          customerId={form.customerId}
+          propertyId={form.propertyId}
+          onChange={(selection) => setForm((current) => ({ ...current, ...selection }))}
+        />
         <Field label="Service">
           <select
             required
@@ -2282,12 +2528,10 @@ function PlannerBookingForm({ data, initialDate, initialTeamId, onCancel, onSave
 }
 
 function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
-  const customers = data?.customers || [];
-  const properties = data?.properties || [];
   const serviceTypes = data?.serviceTypes || [];
   const teams = data?.teams || [];
   const [form, setForm] = useState({
-    customerId: customers[0]?.id || "",
+    customerId: "",
     propertyId: "",
     serviceTypeId: serviceTypes[0]?.id || "",
     preferredTeamId: teams[0]?.id || "",
@@ -2304,13 +2548,6 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const customerProperties = properties.filter((property) => property.customerId === form.customerId);
-
-  useEffect(() => {
-    if (!customerProperties.some((property) => property.id === form.propertyId)) {
-      setForm((current) => ({ ...current, propertyId: customerProperties[0]?.id || "" }));
-    }
-  }, [form.customerId, form.propertyId, customerProperties]);
 
   async function submit(event) {
     event.preventDefault();
@@ -2359,18 +2596,11 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
   return (
     <form className="modal-form" onSubmit={submit}>
       <div className="form-grid">
-        <Field label="Client">
-          <select required value={form.customerId} onChange={(event) => setForm({ ...form, customerId: event.target.value, propertyId: "" })}>
-            <option value="">Select client</option>
-            {customers.map((customer) => <option key={customer.id} value={customer.id}>{customer.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Property">
-          <select required value={form.propertyId} onChange={(event) => setForm({ ...form, propertyId: event.target.value })}>
-            <option value="">Select property</option>
-            {customerProperties.map((property) => <option key={property.id} value={property.id}>{property.addressLine1}</option>)}
-          </select>
-        </Field>
+        <CustomerPropertyPicker
+          customerId={form.customerId}
+          propertyId={form.propertyId}
+          onChange={(selection) => setForm((current) => ({ ...current, ...selection }))}
+        />
         <Field label="Service">
           <select
             required
@@ -2440,6 +2670,84 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
       <Field label="Special instructions"><textarea rows="3" maxLength="5000" value={form.specialInstructions} onChange={(event) => setForm({ ...form, specialInstructions: event.target.value })} /></Field>
       {error && <p className="form-error" role="alert">{error}</p>}
       <FormActions saving={saving} disabled={!form.propertyId || !form.serviceTypeId} onCancel={onCancel} submitLabel="Add recurring service" />
+    </form>
+  );
+}
+
+function EditBookingForm({ booking, serviceTypes, onCancel, onSaved }) {
+  const [form, setForm] = useState({
+    serviceTypeId: booking.serviceTypeId || "",
+    expectedDurationMinutes: booking.expectedDurationMinutes || 150,
+    billingType: booking.billingType || "flat",
+    amount: ((booking.billingType === "hourly"
+      ? booking.billingRateCents
+      : booking.priceCents) / 100).toFixed(2),
+    specialRequests: booking.specialInstructions || ""
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    const rate = cents(form.amount);
+    try {
+      await api.patch(`/bookings/${booking.id}`, {
+        serviceTypeId: form.serviceTypeId,
+        expectedDurationMinutes: Number(form.expectedDurationMinutes),
+        priceCents: form.billingType === "hourly"
+          ? Math.round(rate * Number(form.expectedDurationMinutes) / 60)
+          : rate,
+        billingType: form.billingType,
+        billingRateCents: form.billingType === "hourly" ? rate : null,
+        specialRequests: form.specialRequests
+      });
+      onSaved();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <div className="form-grid">
+        <Field label="Service">
+          <select required value={form.serviceTypeId} onChange={(event) => setForm({ ...form, serviceTypeId: event.target.value })}>
+            <option value="">Select service</option>
+            {serviceTypes.map((service) => (
+              <option key={service.id} value={service.id}>{service.name}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Estimated duration">
+          <input
+            required
+            min="30"
+            max="1440"
+            step="15"
+            type="number"
+            value={form.expectedDurationMinutes}
+            onChange={(event) => setForm({ ...form, expectedDurationMinutes: event.target.value })}
+          />
+        </Field>
+        <Field label="Billing">
+          <select value={form.billingType} onChange={(event) => setForm({ ...form, billingType: event.target.value })}>
+            <option value="flat">Flat fee</option>
+            <option value="hourly">Hourly</option>
+          </select>
+        </Field>
+        <Field label={form.billingType === "hourly" ? "Hourly rate" : "Flat fee"}>
+          <input required min="0" step="0.01" type="number" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} />
+        </Field>
+      </div>
+      <Field label="Special instructions">
+        <textarea rows="4" maxLength="5000" value={form.specialRequests} onChange={(event) => setForm({ ...form, specialRequests: event.target.value })} />
+      </Field>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions saving={saving} onCancel={onCancel} submitLabel="Save service" />
     </form>
   );
 }
@@ -3825,7 +4133,7 @@ function AccountsPanel() {
   const resource = useLoad(async () => {
     const [userData, employeeData] = await Promise.all([
       api.get("/users"),
-      api.list("employees", { active: true, limit: 200 })
+      api.list("employees", { active: true, limit: 100 })
     ]);
     return { users: userData.users || [], employees: employeeData.employees || [] };
   }, []);

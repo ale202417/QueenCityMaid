@@ -33,6 +33,7 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 25 | Managed hosting blueprint, CI release gate, clean production bootstrap, and deployment smoke checks | 24 | done |
 | 26 | Production service defaults and reliable customer/property saves | 25 | done |
 | 27 | Cross-page save reliability, transaction safety, and page crash recovery | 26 | done |
+| 28 | Server-side record pagination and search, property archiving, and scheduled-service editing | 27 | done |
 
 ## Decisions
 
@@ -80,6 +81,11 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 - Financial reports recognize revenue when a payment is collected, calculate
   collection rate from charges settled for the selected period, and separate
   wages from recorded operating expenses.
+- Operational lists use 50-record pages with database-backed prefix search and
+  indexed search fields. Records have no total-count cap; additional pages remain
+  available as the business grows.
+- Deleting a property archives it instead of removing its database row so prior
+  bookings, payments, and reports keep their historical references.
 
 ## Verification
 
@@ -128,6 +134,9 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   payroll/month/year reports, retention, period comparisons, dashboard metrics,
   manager permissions, organization isolation, desktop/mobile layout, live
   migration, public health, and verified post-migration backup: passing.
+- Server-side lead, customer, property, and employee search and pagination,
+  1,020-customer scale coverage, archived property removal, searchable schedule
+  selectors, and scheduled-service editing browser verification: passing.
 
 ## Definition of Done
 

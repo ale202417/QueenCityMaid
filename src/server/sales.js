@@ -398,6 +398,7 @@ function leadRoutes(router, pool) {
   router.get("/leads", asyncRoute(async (req, res) => {
     const input = validate(z.object({
       ...paging,
+      q: z.string().trim().max(200).optional(),
       status: z.enum(leadStatuses).optional(),
       ownerUserId: uuid.optional()
     }).strict(), req.query);
@@ -411,13 +412,33 @@ function leadRoutes(router, pool) {
       params.push(input.ownerUserId);
       where.push(`owner_user_id = $${params.length}`);
     }
-    params.push(input.limit, input.offset);
-    const result = await pool.query(
-      `SELECT * FROM leads WHERE ${where.join(" AND ")}
-       ORDER BY received_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    if (input.q) {
+      params.push(`${input.q.toLowerCase()}%`);
+      where.push(`(
+        LOWER(name) LIKE $${params.length}
+        OR LOWER(email) LIKE $${params.length}
+        OR LOWER(phone) LIKE $${params.length}
+      )`);
+    }
+    const count = await pool.query(
+      `SELECT COUNT(*)::integer AS total FROM leads WHERE ${where.join(" AND ")}`,
       params
     );
-    data(res, { leads: result.rows.map(apiRow) });
+    const listParams = [...params, input.limit, input.offset];
+    const result = await pool.query(
+      `SELECT * FROM leads WHERE ${where.join(" AND ")}
+       ORDER BY received_at DESC
+       LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
+      listParams
+    );
+    data(res, {
+      leads: result.rows.map(apiRow),
+      pagination: {
+        total: Number(count.rows[0].total),
+        limit: input.limit,
+        offset: input.offset
+      }
+    });
   }));
 
   router.post("/leads", asyncRoute(async (req, res) => {

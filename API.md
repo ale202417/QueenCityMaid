@@ -52,7 +52,9 @@ only to the signed-in manager's organization.
 
 Except for `GET /api/employees/me`, all endpoints below require the `manager`
 role and operate only on the signed-in manager's organization. Lists accept
-`limit` (default 100, maximum 200) and `offset`.
+`limit` (default 50, maximum 100) and `offset`. List responses include
+`pagination.total`, `pagination.limit`, and `pagination.offset`; the total
+number of records is not capped.
 
 | Resource | List/Create | Detail/Update/Delete |
 |---|---|---|
@@ -68,6 +70,9 @@ Customer lists can filter by `type` and `status`; property and feedback lists
 by `customerId` or `employeeId`; availability by `employeeId` and `status`;
 service types by `category`; and resources with an `active` field by
 `active=true|false`.
+
+Customer, property, and employee lists also accept `q` for case-insensitive
+prefix search across names and primary contact or address fields.
 
 Customer records support optional `serviceFrequency` values of `weekly`,
 `biweekly`, `monthly`, or `other`, and optional `paymentMethod` values of

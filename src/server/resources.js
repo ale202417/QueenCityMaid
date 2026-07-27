@@ -11,9 +11,10 @@ const text = length => z.string().trim().min(1).max(length);
 const nullableText = length => z.string().trim().max(length).nullable();
 const queryBoolean = z.enum(["true", "false"]).transform(value => value === "true");
 const paging = {
-  limit: z.coerce.number().int().min(1).max(200).default(100),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).default(0)
 };
+const searchQuery = z.string().trim().max(200).optional();
 
 const customerBase = z.object({
   type: z.enum(["residential", "commercial", "realtor"]),
@@ -96,8 +97,15 @@ const configs = [
       preferredChannel: "preferred_channel", serviceFrequency: "service_frequency",
       paymentMethod: "payment_method", status: "status", internalNotes: "internal_notes"
     },
-    list: z.object({ ...paging, type: customerBase.shape.type.optional(), status: customerBase.shape.status }).strict(),
+    list: z.object({
+      ...paging,
+      q: searchQuery,
+      type: customerBase.shape.type.optional(),
+      status: customerBase.shape.status
+    }).strict(),
     filters: { type: "type", status: "status" },
+    search: ["name", "email", "phone"],
+    decorateList: addCustomerPropertyCounts,
     order: "name, created_at DESC",
     archive: { status: "inactive" },
     timestamps: true
@@ -115,8 +123,14 @@ const configs = [
       recentlyServiced: "recently_serviced", pets: "pets",
       accessInstructions: "access_instructions", serviceNotes: "service_notes", active: "active"
     },
-    list: z.object({ ...paging, customerId: uuid.optional(), active: queryBoolean.optional() }).strict(),
+    list: z.object({
+      ...paging,
+      q: searchQuery,
+      customerId: uuid.optional(),
+      active: queryBoolean.optional()
+    }).strict(),
     filters: { customerId: "customer_id", active: "active" },
+    search: ["label", "address_line1", "city", "postal_code"],
     order: "city, address_line1",
     archive: { active: false },
     timestamps: true,
@@ -137,8 +151,9 @@ const configs = [
       hireDate: "hire_date", hourlyRateCents: "hourly_rate_cents",
       experienceLevel: "experience_level", canDrive: "can_drive", active: "active"
     },
-    list: z.object({ ...paging, active: queryBoolean.optional() }).strict(),
+    list: z.object({ ...paging, q: searchQuery, active: queryBoolean.optional() }).strict(),
     filters: { active: "active" },
+    search: ["first_name", "last_name", "phone"],
     order: "last_name, first_name",
     archive: { active: false },
     timestamps: true,
@@ -295,6 +310,22 @@ function resourceName(config) {
   return config.singular.replace(/[A-Z]/g, letter => ` ${letter.toLowerCase()}`);
 }
 
+async function addCustomerPropertyCounts(pool, organizationId, rows) {
+  if (!rows.length) return rows;
+  const customerIds = rows.map((row) => row.id);
+  const placeholders = customerIds.map((_, index) => `$${index + 2}`).join(", ");
+  const result = await pool.query(
+    `SELECT customer_id, COUNT(*)::integer AS property_count
+     FROM properties
+     WHERE organization_id = $1 AND active = true
+       AND customer_id IN (${placeholders})
+     GROUP BY customer_id`,
+    [organizationId, ...customerIds]
+  );
+  const counts = new Map(result.rows.map((row) => [row.customer_id, Number(row.property_count)]));
+  return rows.map((row) => ({ ...row, property_count: counts.get(row.id) || 0 }));
+}
+
 async function requireOwned(client, table, id, organizationId, label = "Resource") {
   const result = await client.query(
     `SELECT * FROM ${table} WHERE id = $1 AND organization_id = $2`,
@@ -343,15 +374,36 @@ function registerCrud(router, pool, config) {
         clauses.push(`${column} = $${params.length}`);
       }
     }
-    params.push(input.limit, input.offset);
-    const result = await pool.query(
-      `SELECT * FROM ${config.table}
-       WHERE ${clauses.join(" AND ")}
-       ORDER BY ${config.order}
-       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    if (input.q && config.search) {
+      params.push(`${input.q.toLowerCase()}%`);
+      clauses.push(`(${config.search.map((column) =>
+        `LOWER(${column}) LIKE $${params.length}`
+      ).join(" OR ")})`);
+    }
+    const count = await pool.query(
+      `SELECT COUNT(*)::integer AS total FROM ${config.table}
+       WHERE ${clauses.join(" AND ")}`,
       params
     );
-    data(res, { [plural]: result.rows.map(apiRow) });
+    const listParams = [...params, input.limit, input.offset];
+    const result = await pool.query(
+      `SELECT ${config.select || "*"} FROM ${config.table}
+       WHERE ${clauses.join(" AND ")}
+       ORDER BY ${config.order}
+       LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
+      listParams
+    );
+    const rows = config.decorateList
+      ? await config.decorateList(pool, req.auth.organizationId, result.rows)
+      : result.rows;
+    data(res, {
+      [plural]: rows.map(apiRow),
+      pagination: {
+        total: Number(count.rows[0].total),
+        limit: input.limit,
+        offset: input.offset
+      }
+    });
   }));
 
   router.post(`/${config.path}`, route(async (req, res) => {

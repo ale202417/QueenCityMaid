@@ -420,6 +420,7 @@ async function planner(pool, organizationId, key, reference) {
               b.expected_duration_minutes AS "expectedDurationMinutes",
               b.price_cents AS "priceCents", b.billing_type AS "billingType",
               b.billing_rate_cents AS "billingRateCents",
+              b.service_type_id AS "serviceTypeId",
               b.special_requests AS "specialInstructions",
               b.recurring_service_id AS "recurringServiceId",
               c.name AS "customerName", p.address_line1 AS "addressLine1",

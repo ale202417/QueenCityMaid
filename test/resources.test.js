@@ -98,6 +98,7 @@ describe("manager resources", () => {
     });
     const customerList = await request("/api/customers?status=active", { cookie });
     assert.equal(customerList.response.status, 200);
+    assert.equal(customerList.body.data.pagination.total, 1);
     assert.equal(customerList.body.data.customers[0].id, customer.id);
     assert.equal(customerList.body.data.customers[0].serviceFrequency, "biweekly");
     assert.equal(customerList.body.data.customers[0].paymentMethod, "venmo");
@@ -143,6 +144,8 @@ describe("manager resources", () => {
     assert.equal(propertyUpdate.body.data.property.accessInstructions, "Side door");
     const propertyList = await request(`/api/properties?customerId=${customer.id}`, { cookie });
     assert.equal(propertyList.body.data.properties.length, 1);
+    const customerWithProperty = await request("/api/customers?q=Jamie", { cookie });
+    assert.equal(customerWithProperty.body.data.customers[0].propertyCount, 1);
 
     const { serviceType } = await create(request, cookie, "/api/service-types", {
       name: "Deep Cleaning",
@@ -166,6 +169,11 @@ describe("manager resources", () => {
       cookie
     });
     assert.equal(archivedProperty.body.data.property.active, false);
+    const activeProperties = await request(
+      `/api/properties?customerId=${customer.id}&active=true`,
+      { cookie }
+    );
+    assert.equal(activeProperties.body.data.pagination.total, 0);
     const archivedService = await request(`/api/service-types/${serviceType.id}`, {
       method: "DELETE",
       cookie
@@ -176,6 +184,34 @@ describe("manager resources", () => {
       cookie
     });
     assert.equal(archivedCustomer.body.data.customer.status, "inactive");
+  });
+
+  it("paginates and searches customer records without a total-record cap", async () => {
+    const { pool, ids, request, login } = await fixture();
+    const { cookie } = await login("manager-a@example.com");
+    for (let index = 0; index < 1020; index += 1) {
+      await pool.query(
+        `INSERT INTO customers (id, organization_id, type, name, phone, status)
+         VALUES ($1, $2, 'residential', $3, $4, 'active')`,
+        [
+          crypto.randomUUID(),
+          ids.organizationA,
+          `Scale Customer ${String(index).padStart(3, "0")}`,
+          `704555${String(index).padStart(4, "0")}`
+        ]
+      );
+    }
+
+    const first = await request("/api/customers?limit=50&offset=0", { cookie });
+    const last = await request("/api/customers?limit=50&offset=1000", { cookie });
+    assert.equal(first.body.data.pagination.total, 1020);
+    assert.equal(first.body.data.customers.length, 50);
+    assert.equal(last.body.data.customers.length, 20);
+    assert.notEqual(first.body.data.customers[0].id, last.body.data.customers[0].id);
+
+    const searched = await request("/api/customers?q=Scale%20Customer%201019", { cookie });
+    assert.equal(searched.body.data.pagination.total, 1);
+    assert.equal(searched.body.data.customers[0].name, "Scale Customer 1019");
   });
 
   it("manages employees, teams, availability, and quality feedback", async () => {
