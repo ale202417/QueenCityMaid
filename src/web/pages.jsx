@@ -32,20 +32,34 @@ export function ProductPage({ path, user }) {
 
 function useLoad(loader, dependencies) {
   const [state, setState] = useState({ status: "loading", data: null, error: "" });
+  const requestId = useRef(0);
   const load = useCallback(async () => {
+    const currentRequest = ++requestId.current;
     setState((current) => ({ ...current, status: "loading", error: "" }));
     try {
-      setState({ status: "ready", data: await loader(), error: "" });
+      const result = await loader();
+      if (currentRequest === requestId.current) {
+        setState({ status: "ready", data: result, error: "" });
+      }
     } catch (error) {
-      setState({ status: "error", data: null, error: errorMessage(error) });
+      if (currentRequest === requestId.current) {
+        setState({ status: "error", data: null, error: errorMessage(error) });
+      }
     }
   }, dependencies);
 
   useEffect(() => {
     load();
+    return () => {
+      requestId.current += 1;
+    };
   }, [load]);
 
   return { ...state, reload: load, setState };
+}
+
+function upsertById(items, item) {
+  return [item, ...items.filter((current) => current.id !== item.id)];
 }
 
 function PageHeader({ eyebrow, title, description, children }) {
@@ -616,10 +630,20 @@ function CustomersPage() {
           <CustomerForm
             customer={modal.item}
             onCancel={() => setModal(null)}
-            onSaved={(message) => {
+            onSaved={(message, savedCustomer) => {
               setModal(null);
               setNotice({ message });
-              resource.reload();
+              resource.setState((current) => {
+                const data = current.data || { customers: [], properties: [] };
+                return {
+                  status: "ready",
+                  error: "",
+                  data: {
+                    ...data,
+                    customers: upsertById(data.customers || [], savedCustomer)
+                  }
+                };
+              });
             }}
           />
         </Modal>
@@ -629,9 +653,19 @@ function CustomersPage() {
           customer={modal.customer}
           properties={properties.filter((property) => property.customerId === modal.customer.id)}
           onClose={() => setModal(null)}
-          onChanged={(message) => {
+          onChanged={(message, savedProperty) => {
             setNotice({ message });
-            resource.reload();
+            resource.setState((current) => {
+              const data = current.data || { customers: [], properties: [] };
+              return {
+                status: "ready",
+                error: "",
+                data: {
+                  ...data,
+                  properties: upsertById(data.properties || [], savedProperty)
+                }
+              };
+            });
           }}
         />
       )}
@@ -677,9 +711,10 @@ function CustomerForm({ customer, onCancel, onSaved }) {
       paymentMethod: form.paymentMethod || null
     };
     try {
-      if (customer) await api.update("customers", customer.id, payload);
-      else await api.create("customers", payload);
-      onSaved(customer ? "Customer updated." : "Customer added.");
+      const result = customer
+        ? await api.update("customers", customer.id, payload)
+        : await api.create("customers", payload);
+      onSaved(customer ? "Customer updated." : "Customer added.", result.customer);
     } catch (requestError) {
       setError(errorMessage(requestError));
     } finally {
@@ -783,9 +818,9 @@ function PropertyManager({ customer, properties, onClose, onChanged }) {
           customerId={customer.id}
           property={editing.id ? editing : null}
           onCancel={() => setEditing(null)}
-          onSaved={(message) => {
+          onSaved={(message, savedProperty) => {
             setEditing(null);
-            onChanged(message);
+            onChanged(message, savedProperty);
           }}
         />
       )}
@@ -826,9 +861,10 @@ function PropertyForm({ customerId, property, onCancel, onSaved }) {
       recentlyServiced: form.recentlyServiced === "" ? null : form.recentlyServiced === "true"
     };
     try {
-      if (property) await api.update("properties", property.id, payload);
-      else await api.create("properties", payload);
-      onSaved(property ? "Property updated." : "Property added.");
+      const result = property
+        ? await api.update("properties", property.id, payload)
+        : await api.create("properties", payload);
+      onSaved(property ? "Property updated." : "Property added.", result.property);
     } catch (requestError) {
       setError(errorMessage(requestError));
     } finally {

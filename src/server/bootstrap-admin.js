@@ -12,6 +12,25 @@ const inputSchema = z.object({
   managerPassword: z.string().min(12).max(200)
 }).strict();
 
+const defaultServiceTypes = [
+  ["Regular Cleaning", 180, ["Kitchen", "Bathrooms", "Bedrooms", "Floors"]],
+  ["Deep Cleaning", 300, ["Kitchen", "Bathrooms", "Baseboards", "Fixtures", "Floors"]],
+  ["Move In Cleaning", 300, ["Kitchen", "Bathrooms", "Cabinets", "Closets", "Floors"]],
+  ["Move Out Cleaning", 300, ["Kitchen", "Bathrooms", "Cabinets", "Closets", "Floors"]]
+];
+
+async function ensureDefaultServiceTypes(client, organizationId) {
+  for (const [name, duration, checklist] of defaultServiceTypes) {
+    await client.query(
+      `INSERT INTO service_types
+       (id, organization_id, name, category, default_duration_minutes, reference_checklist)
+       VALUES ($1, $2, $3, 'residential', $4, $5)
+       ON CONFLICT (organization_id, name) DO NOTHING`,
+      [crypto.randomUUID(), organizationId, name, duration, JSON.stringify(checklist)]
+    );
+  }
+}
+
 export async function bootstrapAdmin(pool, rawInput) {
   const input = inputSchema.parse(rawInput);
   const client = await pool.connect();
@@ -36,6 +55,7 @@ export async function bootstrapAdmin(pool, rawInput) {
        ON CONFLICT (organization_id) DO NOTHING`,
       [organizationId]
     );
+    await ensureDefaultServiceTypes(client, organizationId);
 
     const existing = await client.query(
       `SELECT id, organization_id, role

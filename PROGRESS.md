@@ -30,7 +30,8 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 22 | Alternating-week crew schedule planner, flexible recurrence, moves, and service history | 11-14, 21 | done |
 | 23 | Manager-entered two-week payroll, weekly hour sheets, reports, and history | 7, 16 | done |
 | 24 | Daily payment decisions, financial reports, comparison analytics, and executive dashboard | 15, 17, 23 | done |
-| 25 | Managed hosting blueprint, CI release gate, clean production bootstrap, and deployment smoke checks | 24 | in_progress |
+| 25 | Managed hosting blueprint, CI release gate, clean production bootstrap, and deployment smoke checks | 24 | done |
+| 26 | Production service defaults and reliable customer/property saves | 25 | done |
 
 ## Decisions
 
@@ -113,6 +114,11 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 - Two-week payroll generation, active employee snapshots, Monday-Friday hour
   entry and editing, tips, overtime, captain day pay, approval locks, summary
   exports, payroll history, responsive UI, and live public workflow: passing.
+- Managed Render web service and PostgreSQL deployment, clean manager bootstrap,
+  temporary-secret cleanup, permanent HTTPS smoke checks, and database health:
+  passing.
+- Standard service initialization, stale-request rejection, and immediate
+  customer/property save visibility with fake-data browser verification: passing.
 - Daily schedule ledger, flat and hourly payment decisions, immutable approved
   receipts, outstanding balances, account credits, customer standing, expenses,
   payroll/month/year reports, retention, period comparisons, dashboard metrics,

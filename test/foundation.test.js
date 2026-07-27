@@ -18,7 +18,8 @@ describe("database foundation", () => {
         "005_customer_preferences.sql",
         "006_schedule_planner.sql",
         "007_payroll_workflow.sql",
-        "008_financial_operations.sql"
+        "008_financial_operations.sql",
+        "009_default_service_types.sql"
       ]
     );
 

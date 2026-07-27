@@ -34,6 +34,14 @@ describe("production manager bootstrap", () => {
         Number((await pool.query("SELECT COUNT(*) AS count FROM business_settings")).rows[0].count),
         1
       );
+      const services = await pool.query(
+        "SELECT name FROM service_types WHERE organization_id = $1 ORDER BY name",
+        [created.organizationId]
+      );
+      assert.deepEqual(
+        services.rows.map(row => row.name),
+        ["Deep Cleaning", "Move In Cleaning", "Move Out Cleaning", "Regular Cleaning"]
+      );
     } finally {
       await pool.end();
     }

@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { newDb } from "pg-mem";
@@ -7,6 +8,7 @@ import { seed } from "./seed-data.js";
 
 const memory = newDb({ autoCreateForeignKeyIndices: true, noAstCoverageCheck: true });
 memory.public.registerFunction({ name: "now", returns: "timestamptz", implementation: () => new Date() });
+memory.public.registerFunction({ name: "gen_random_uuid", returns: "uuid", implementation: () => crypto.randomUUID() });
 const adapter = memory.adapters.createPg();
 const pool = new adapter.Pool();
 
