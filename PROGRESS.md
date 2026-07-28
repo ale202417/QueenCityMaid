@@ -49,7 +49,7 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 41 | Record-level dashboard action center for operational exceptions | 39 | done |
 | 42 | Manager automation settings, manual run control, and run history UI | 40, 41 | done |
 | 43 | Automation API, permission, isolation, idempotency, browser, and upgrade tests | 40-42 | done |
-| 44 | Production release, deployment verification, and external smoke checks | 43 | in_progress |
+| 44 | Production release, deployment verification, and external smoke checks | 43 | done |
 
 ## Decisions
 
@@ -233,6 +233,23 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   internal health check passed, and commit `46ea5fe` became live.
 - External HTTPS health, cache-control, server-signature, application-shell,
   live sign-in-screen, and browser-console smoke checks: passing.
+- Admin automations queue the next two schedule weeks and optional
+  consent-checked service and balance reminders. Daily claim, duplicate,
+  failed-run retry, provider-state, manager permission, organization isolation,
+  and manual-run tests pass.
+- The dashboard Action Center returns named overdue leads, unassigned visits,
+  unresolved issues, failed messages, availability requests, and customer
+  balances without cross-organization exposure.
+- Complete API regression suite: 72 passing tests. Complete Playwright workflow
+  suite: 24 passing tests, including persisted automation settings and manual
+  run history at desktop and mobile widths.
+- Real PostgreSQL 18 previous-release upgrade through migration 014: passing
+  with prior accounts and financial records preserved and outbound reminder
+  automation disabled by default.
+- GitHub CI run 13 passed for commit `008348a`; Render completed migration 014,
+  passed its internal health check, and made the release live.
+- External production smoke and live browser-console checks pass at
+  `https://queen-city-maid-operations.onrender.com`.
 
 ## Definition of Done
 
