@@ -244,26 +244,15 @@ function StatusBadge({ status = "active" }) {
 function DashboardPage() {
   const resource = useLoad(() => api.dashboard(), []);
   const data = resource.data || {};
-  const exceptions = [
-    data.overdueLeads > 0 && {
-      label: "Overdue leads",
-      value: data.overdueLeads,
-      detail: "Lead responses have passed the one-hour target.",
-      href: "#/leads"
-    },
-    data.unassignedBookings > 0 && {
-      label: "Unassigned bookings",
-      value: data.unassignedBookings,
-      detail: "Upcoming services still need a team and route.",
-      href: "#/schedule"
-    },
-    data.pendingNotifications > 0 && {
-      label: "Queued messages",
-      value: data.pendingNotifications,
-      detail: "Customer messages are waiting to be sent.",
-      href: "#/messages"
-    }
-  ].filter(Boolean);
+  const actionItems = data.actionItems || [];
+  const actionPaths = {
+    overdue_lead: "#/leads",
+    unassigned_booking: "#/schedule",
+    job_issue: "#/schedule",
+    failed_message: "#/messages",
+    availability_request: "#/employees",
+    customer_balance: "#/payments"
+  };
 
   return (
     <>
@@ -304,9 +293,9 @@ function DashboardPage() {
 
       <section className="section-block" aria-labelledby="dashboard-attention">
         <SectionHeader
-          eyebrow="Exception queue"
-          title="Needs attention"
-          count={resource.status === "ready" ? exceptions.length : undefined}
+          eyebrow="Manager queue"
+          title="Action center"
+          count={resource.status === "ready" ? actionItems.length : undefined}
         />
         {resource.status === "loading" && <LoadingRows />}
         {resource.status === "error" && (
@@ -316,22 +305,34 @@ function DashboardPage() {
             action={<button className="text-button" onClick={resource.reload}>Try again</button>}
           />
         )}
-        {resource.status === "ready" && exceptions.length === 0 && (
+        {resource.status === "ready" && actionItems.length === 0 && (
           <StatePanel
-            title="No urgent exceptions"
-            message="Lead response, staffing, and message queues are within their current targets."
+            title="No open actions"
+            message="Lead response, scheduling, service issues, messages, staffing requests, and balances are clear."
           />
         )}
-        {resource.status === "ready" && exceptions.length > 0 && (
+        {resource.status === "ready" && actionItems.length > 0 && (
           <div className="exception-list">
-            {exceptions.map((item) => (
-              <a className="exception-row exception-link" href={item.href} key={item.label}>
+            {actionItems.map((item) => (
+              <a
+                className="exception-row exception-link"
+                href={actionPaths[item.kind]}
+                key={`${item.kind}:${item.entityId}`}
+              >
                 <span className="severity high" aria-hidden="true" />
                 <div>
-                  <strong>{item.label}</strong>
+                  <strong>{item.title}</strong>
                   <p>{item.detail}</p>
                 </div>
-                <span className="exception-value">{item.value}</span>
+                <span className="exception-value">
+                  {item.valueCents !== undefined
+                    ? money(item.valueCents)
+                    : item.dueAt
+                      ? /^\d{4}-\d{2}-\d{2}$/.test(item.dueAt)
+                        ? shortDate(item.dueAt)
+                        : dateTime(item.dueAt)
+                      : "Open"}
+                </span>
               </a>
             ))}
           </div>
@@ -5905,6 +5906,7 @@ function SettingsPage() {
         <div className="segmented-control" aria-label="Settings views">
           {[
             ["business", "Business"],
+            ["automation", "Automation"],
             ["services", "Services"],
             ["accounts", "Accounts"],
             ["history", "Activity"],
@@ -5924,11 +5926,208 @@ function SettingsPage() {
         </div>
       </section>
       {tab === "business" && <BusinessSettingsPanel />}
+      {tab === "automation" && <AutomationSettingsPanel />}
       {tab === "services" && <ServiceTypesPanel />}
       {tab === "accounts" && <AccountsPanel />}
       {tab === "history" && <AuditHistoryPanel />}
       {tab === "security" && <SecurityPanel />}
       {tab === "imports" && <ImportsPanel />}
+    </>
+  );
+}
+
+function automationSummary(summary = {}) {
+  const parts = [];
+  if (summary.schedule?.enabled) {
+    parts.push(`${summary.schedule.created || 0} visits created`);
+  }
+  if (summary.serviceReminders?.enabled) {
+    parts.push(`${summary.serviceReminders.queued || 0} service reminders queued`);
+  }
+  if (summary.paymentReminders?.enabled) {
+    parts.push(`${summary.paymentReminders.queued || 0} balance reminders queued`);
+  }
+  return parts.join(", ") || "No enabled steps";
+}
+
+function AutomationSettingsPanel() {
+  const resource = useLoad(() => api.get("/automations"), []);
+  const [form, setForm] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [running, setRunning] = useState(false);
+
+  useEffect(() => {
+    if (!resource.data?.settings) return;
+    setForm({
+      scheduleAutomationEnabled: resource.data.settings.scheduleEnabled,
+      serviceReminderAutomationEnabled: resource.data.settings.serviceRemindersEnabled,
+      paymentReminderAutomationEnabled: resource.data.settings.paymentRemindersEnabled,
+      automationRunTime: resource.data.settings.runTime,
+      paymentReminderDays: resource.data.settings.paymentReminderDays
+    });
+  }, [resource.data]);
+
+  async function save(event) {
+    event.preventDefault();
+    setSaving(true);
+    setNotice(null);
+    try {
+      await api.patch("/settings", {
+        ...form,
+        paymentReminderDays: Number(form.paymentReminderDays)
+      });
+      setNotice({ message: "Automation settings saved." });
+      resource.reload();
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function runNow() {
+    setRunning(true);
+    setNotice(null);
+    try {
+      const result = await api.post("/automations/run");
+      setNotice({
+        message: `Automation finished: ${automationSummary(result.run.summary)}.`
+      });
+      resource.reload();
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    } finally {
+      setRunning(false);
+    }
+  }
+
+  const runs = resource.data?.runs || [];
+  return (
+    <>
+      <Notice notice={notice} onClose={() => setNotice(null)} />
+      <section className="section-block settings-section">
+        {resource.status === "loading" && <LoadingRows />}
+        {resource.status === "error" && (
+          <StatePanel
+            title="Automations unavailable"
+            message={resource.error}
+            action={<button className="text-button" onClick={resource.reload}>Try again</button>}
+          />
+        )}
+        {resource.status === "ready" && form && (
+          <form className="settings-form" onSubmit={save}>
+            <SectionHeader eyebrow="Daily operations" title="Automation controls">
+              <button
+                className="secondary-button inline-button"
+                disabled={running}
+                type="button"
+                onClick={runNow}
+              >
+                {running ? "Running..." : "Run now"}
+              </button>
+            </SectionHeader>
+            {!resource.data.providerConfigured
+              && (form.serviceReminderAutomationEnabled
+                || form.paymentReminderAutomationEnabled) && (
+                <div className="inline-warning">
+                  SMS delivery is not configured. Messages will remain queued until a provider is connected.
+                </div>
+              )}
+            <div className="automation-options">
+              <label className="automation-option">
+                <input
+                  checked={form.scheduleAutomationEnabled}
+                  type="checkbox"
+                  onChange={(event) => setForm({
+                    ...form,
+                    scheduleAutomationEnabled: event.target.checked
+                  })}
+                />
+                <span><strong>Schedule upkeep</strong><small>Generate the next two Schedule A/B weeks.</small></span>
+              </label>
+              <label className="automation-option">
+                <input
+                  checked={form.serviceReminderAutomationEnabled}
+                  type="checkbox"
+                  onChange={(event) => setForm({
+                    ...form,
+                    serviceReminderAutomationEnabled: event.target.checked
+                  })}
+                />
+                <span><strong>Service reminders</strong><small>Queue consented customer texts one day before service.</small></span>
+              </label>
+              <label className="automation-option">
+                <input
+                  checked={form.paymentReminderAutomationEnabled}
+                  type="checkbox"
+                  onChange={(event) => setForm({
+                    ...form,
+                    paymentReminderAutomationEnabled: event.target.checked
+                  })}
+                />
+                <span><strong>Balance reminders</strong><small>Queue consented customer texts when a balance remains due.</small></span>
+              </label>
+            </div>
+            <div className="form-grid">
+              <Field label="Daily run time">
+                <input
+                  required
+                  type="time"
+                  value={form.automationRunTime}
+                  onChange={(event) => setForm({
+                    ...form,
+                    automationRunTime: event.target.value
+                  })}
+                />
+              </Field>
+              <Field label="Balance reminder interval" hint="Days">
+                <input
+                  required
+                  min="1"
+                  max="365"
+                  type="number"
+                  value={form.paymentReminderDays}
+                  onChange={(event) => setForm({
+                    ...form,
+                    paymentReminderDays: event.target.value
+                  })}
+                />
+              </Field>
+            </div>
+            <button className="primary-button inline-button" disabled={saving} type="submit">
+              {saving ? "Saving..." : "Save automation"}
+            </button>
+          </form>
+        )}
+      </section>
+      {resource.status === "ready" && (
+        <section className="section-block settings-section">
+          <SectionHeader eyebrow="Audit trail" title="Recent automation runs" count={runs.length} />
+          {!runs.length && (
+            <StatePanel title="No automation runs" message="The first completed run will appear here." />
+          )}
+          {runs.length > 0 && (
+            <div className="data-table automation-history">
+              <div className="data-row data-head">
+                <span>Started</span><span>Trigger</span><span>Status</span><span>Result</span>
+              </div>
+              {runs.map((run) => (
+                <div className="data-row" key={run.id}>
+                  <span data-label="Started">{dateTime(run.startedAt)}</span>
+                  <span data-label="Trigger">{capitalize(run.trigger)}</span>
+                  <span data-label="Status"><StatusBadge status={run.status} /></span>
+                  <span data-label="Result">
+                    {run.status === "failed"
+                      ? run.errorMessage
+                      : automationSummary(run.summary)}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
     </>
   );
 }

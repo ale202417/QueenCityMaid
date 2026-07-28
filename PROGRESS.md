@@ -44,6 +44,12 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 36 | End-to-end manager module audit and P0-P2 repairs | 35 | done |
 | 37 | Reversible admin controls and record-level history | 36 | done |
 | 38 | Final migration, CI, deployment, and production smoke gates | 37 | done |
+| 39 | Admin automation release design, safety rules, and migration plan | 38 | done |
+| 40 | Daily automation runner for schedule upkeep, service reminders, and balance reminders | 39 | done |
+| 41 | Record-level dashboard action center for operational exceptions | 39 | done |
+| 42 | Manager automation settings, manual run control, and run history UI | 40, 41 | done |
+| 43 | Automation API, permission, isolation, idempotency, browser, and upgrade tests | 40-42 | done |
+| 44 | Production release, deployment verification, and external smoke checks | 43 | in_progress |
 
 ## Decisions
 
@@ -62,6 +68,16 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   files without expanding the production dependency surface.
 - Production SMS and map credentials remain external configuration. Manual route
   order and travel estimates remain available without a map provider.
+- Customer-facing service and balance reminder automations default off and
+  require a manager to enable them. Recurring schedule upkeep defaults on
+  because its existing generation path is idempotent and does not contact
+  customers.
+- Daily automation uses one claimed run per organization and calendar day,
+  with manual runs recorded separately. It reuses existing schedule and
+  notification idempotency keys instead of introducing a generic rule engine.
+- The dashboard action center shows organization-scoped records that need a
+  manager decision; automation does not silently assign crews, resolve issues,
+  or mark payments.
 - The live local demo uses a dedicated PostgreSQL 18 cluster on loopback port
   55432. Its data, credentials, logs, and backups are excluded from Git.
 - Database migrations use a separate owner role; the live web process uses a

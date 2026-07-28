@@ -108,7 +108,9 @@ not exposed.
   documented in [API_REPORTING.md](API_REPORTING.md).
 - Payroll periods are selected by their two-week date range in the application;
   internal record IDs are used only in API paths.
-- `GET /api/dashboard` returns live operational counts.
+- `GET /api/dashboard` returns live operational counts and named action-center
+  records for overdue leads, unassigned services, unresolved job issues, failed
+  messages, availability requests, and customer balances.
 - `GET /api/reports/operations?from=YYYY-MM-DD&to=YYYY-MM-DD` returns booking,
   finance, and labor summaries.
 - `GET/PATCH /api/settings` reads or updates organization business rules.
@@ -131,6 +133,23 @@ not exposed.
   `POST /api/notifications/:id/retry` control queued or failed delivery.
 - `GET /api/inbound-messages` lists received customer messages;
   `POST /api/notifications/send-due` runs an immediate delivery pass.
+- `GET /api/automations` returns manager-only automation settings, SMS provider
+  readiness, and the 20 most recent automation runs for the organization.
+- `POST /api/automations/run` runs the enabled daily operations steps
+  immediately and records the result. Scheduled and manual runs reuse booking
+  and notification idempotency keys.
+
+## Daily Automations
+
+Organization settings control automatic Schedule A/B upkeep, consent-checked
+day-before service reminders, consent-checked overdue balance reminders, the
+balance reminder interval, and the daily run time. Customer-facing reminder
+automations default off. Schedule upkeep defaults on.
+
+The background worker claims one scheduled run per organization and local
+calendar day. Failed or stale runs can be retried; completed runs cannot create
+duplicate visits or messages. Managers can review every result and run the same
+steps manually from Settings.
 
 ## Dispatch And Service Day
 

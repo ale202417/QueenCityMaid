@@ -2516,6 +2516,62 @@ textarea:hover {
   border-bottom: 1px solid var(--border);
 }
 
+.automation-options {
+  display: grid;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.automation-option {
+  display: grid;
+  min-height: 66px;
+  padding: 12px 14px;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.automation-option:last-child {
+  border-bottom: 0;
+}
+
+.automation-option input {
+  width: 17px;
+  min-height: 17px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.automation-option span {
+  display: grid;
+  gap: 3px;
+}
+
+.automation-option strong {
+  font-size: 0.8rem;
+}
+
+.automation-option small {
+  color: var(--muted);
+  font-size: 0.73rem;
+}
+
+.automation-history .data-row {
+  grid-template-columns: 140px 90px 110px minmax(0, 1fr);
+}
+
+.inline-warning {
+  padding: 11px 13px;
+  color: #72520a;
+  background: #fff8dc;
+  border: 1px solid #d8c578;
+  border-radius: 5px;
+  font-size: 0.76rem;
+}
+
 .import-result {
   margin-top: 24px;
 }

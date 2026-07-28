@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createApp } from "./app.js";
+import { runDueAutomations } from "./automation.js";
 import { createSmsSender, sendDueNotifications } from "./communications.js";
 import { createMigrationPool, createPool, migrate } from "./db.js";
 
@@ -28,9 +29,26 @@ const notificationTimer = setInterval(() => {
   });
 }, 60_000);
 notificationTimer.unref();
+async function runAutomationWorker() {
+  try {
+    await runDueAutomations(pool);
+  } catch (error) {
+    console.error("Daily automation worker failed", error);
+  }
+}
+if (process.env.AUTOMATION_WORKER_ENABLED !== "false") {
+  void runAutomationWorker();
+}
+const automationTimer = setInterval(() => {
+  if (process.env.AUTOMATION_WORKER_ENABLED !== "false") {
+    void runAutomationWorker();
+  }
+}, 5 * 60_000);
+automationTimer.unref();
 
 async function shutdown() {
   clearInterval(notificationTimer);
+  clearInterval(automationTimer);
   server.close(async () => {
     await pool.end();
     process.exit(0);

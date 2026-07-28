@@ -56,7 +56,14 @@ const settingsSchema = z.object({
   routeWarningMinutes: z.number().int().positive().max(1440).optional(),
   routeWarningEndTime: z.string().regex(/^\d{2}:\d{2}(:\d{2})?$/).optional(),
   quoteReviewDays: z.number().int().positive().max(365).optional(),
-  paymentReminderDays: z.number().int().positive().max(365).optional()
+  paymentReminderDays: z.number().int().positive().max(365).optional(),
+  scheduleAutomationEnabled: z.boolean().optional(),
+  serviceReminderAutomationEnabled: z.boolean().optional(),
+  paymentReminderAutomationEnabled: z.boolean().optional(),
+  automationRunTime: z.string().regex(/^\d{2}:\d{2}$/).refine((value) => {
+    const [hour, minute] = value.split(":").map(Number);
+    return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+  }, "Invalid time").optional()
 }).strict().refine((value) => Object.keys(value).length > 0, "At least one setting is required");
 
 const settingsColumns = {
@@ -67,7 +74,11 @@ const settingsColumns = {
   routeWarningMinutes: "route_warning_minutes",
   routeWarningEndTime: "route_warning_end_time",
   quoteReviewDays: "quote_review_days",
-  paymentReminderDays: "payment_reminder_days"
+  paymentReminderDays: "payment_reminder_days",
+  scheduleAutomationEnabled: "schedule_automation_enabled",
+  serviceReminderAutomationEnabled: "service_reminder_automation_enabled",
+  paymentReminderAutomationEnabled: "payment_reminder_automation_enabled",
+  automationRunTime: "automation_run_time"
 };
 
 function apiSettings(row) {
@@ -79,7 +90,11 @@ function apiSettings(row) {
     routeWarningMinutes: row.route_warning_minutes,
     routeWarningEndTime: row.route_warning_end_time,
     quoteReviewDays: row.quote_review_days,
-    paymentReminderDays: row.payment_reminder_days
+    paymentReminderDays: row.payment_reminder_days,
+    scheduleAutomationEnabled: row.schedule_automation_enabled,
+    serviceReminderAutomationEnabled: row.service_reminder_automation_enabled,
+    paymentReminderAutomationEnabled: row.payment_reminder_automation_enabled,
+    automationRunTime: String(row.automation_run_time).slice(0, 5)
   };
 }
 
@@ -301,6 +316,129 @@ export function createReportingRouter({ pool }) {
         [organizationId, payPeriod.id])
         : 0
     ]);
+    const [
+      attentionLeads,
+      attentionBookings,
+      attentionIssues,
+      attentionMessages,
+      attentionAvailability,
+      attentionBalances
+    ] = await Promise.all([
+      pool.query(
+        `SELECT id, name, response_due_at AS "dueAt"
+         FROM leads
+         WHERE organization_id = $1 AND status = 'new' AND response_due_at < now()
+         ORDER BY response_due_at LIMIT 3`,
+        [organizationId]
+      ),
+      pool.query(
+        `SELECT b.id, c.name, COALESCE(b.service_date, CAST(b.scheduled_start AS date))
+                  AS "serviceDate"
+         FROM bookings b
+         JOIN customers c
+           ON c.id = b.customer_id AND c.organization_id = b.organization_id
+         LEFT JOIN route_stops rs ON rs.booking_id = b.id
+         WHERE b.organization_id = $1
+           AND COALESCE(b.service_date, CAST(b.scheduled_start AS date))
+               BETWEEN $2 AND $3
+           AND b.status IN ('requested', 'confirmed')
+           AND rs.booking_id IS NULL
+         ORDER BY COALESCE(b.service_date, CAST(b.scheduled_start AS date))
+         LIMIT 3`,
+        [organizationId, today, addDays(today, 7)]
+      ),
+      pool.query(
+        `SELECT ji.id, ji.type, ji.created_at AS "createdAt", c.name
+         FROM job_issues ji
+         JOIN bookings b
+           ON b.id = ji.booking_id AND b.organization_id = ji.organization_id
+         JOIN customers c
+           ON c.id = b.customer_id AND c.organization_id = b.organization_id
+         WHERE ji.organization_id = $1 AND ji.resolved_at IS NULL
+         ORDER BY ji.created_at
+         LIMIT 3`,
+        [organizationId]
+      ),
+      pool.query(
+        `SELECT n.id, n.failure_reason AS "failureReason",
+                n.created_at AS "createdAt", COALESCE(c.name, n.destination) AS name
+         FROM notifications n
+         LEFT JOIN customers c
+           ON c.id = n.customer_id AND c.organization_id = n.organization_id
+         WHERE n.organization_id = $1 AND n.status = 'failed'
+         ORDER BY n.created_at DESC
+         LIMIT 3`,
+        [organizationId]
+      ),
+      pool.query(
+        `SELECT ae.id, ae.starts_at AS "startsAt", ae.reason,
+                e.first_name AS "firstName", e.last_name AS "lastName"
+         FROM availability_exceptions ae
+         JOIN employees e
+           ON e.id = ae.employee_id AND e.organization_id = ae.organization_id
+         WHERE ae.organization_id = $1 AND ae.status = 'requested'
+         ORDER BY ae.starts_at
+         LIMIT 3`,
+        [organizationId]
+      ),
+      pool.query(
+        `SELECT c.id, c.name, COALESCE(SUM(cc.amount_cents), 0)::integer AS "balanceCents",
+                MIN(cc.charged_on) AS "oldestChargeDate"
+         FROM customers c
+         JOIN customer_charges cc
+           ON cc.customer_id = c.id AND cc.organization_id = c.organization_id
+         WHERE c.organization_id = $1 AND cc.status = 'unpaid'
+         GROUP BY c.id, c.name
+         ORDER BY COALESCE(SUM(cc.amount_cents), 0) DESC
+         LIMIT 3`,
+        [organizationId]
+      )
+    ]);
+    const actionItems = [
+      ...attentionLeads.rows.map((item) => ({
+        kind: "overdue_lead",
+        entityId: item.id,
+        title: `Respond to ${item.name}`,
+        detail: "Lead response target has passed.",
+        dueAt: item.dueAt
+      })),
+      ...attentionBookings.rows.map((item) => ({
+        kind: "unassigned_booking",
+        entityId: item.id,
+        title: `Assign ${item.name}`,
+        detail: "Upcoming service has no crew or route.",
+        dueAt: asDate(item.serviceDate)
+      })),
+      ...attentionIssues.rows.map((item) => ({
+        kind: "job_issue",
+        entityId: item.id,
+        title: `Resolve ${item.name} issue`,
+        detail: `Open ${String(item.type).replaceAll("_", " ")} issue.`,
+        dueAt: item.createdAt
+      })),
+      ...attentionMessages.rows.map((item) => ({
+        kind: "failed_message",
+        entityId: item.id,
+        title: `Retry message for ${item.name}`,
+        detail: item.failureReason || "Message delivery failed.",
+        dueAt: item.createdAt
+      })),
+      ...attentionAvailability.rows.map((item) => ({
+        kind: "availability_request",
+        entityId: item.id,
+        title: `Review ${item.firstName} ${item.lastName}`,
+        detail: item.reason || "Availability request needs a decision.",
+        dueAt: item.startsAt
+      })),
+      ...attentionBalances.rows.map((item) => ({
+        kind: "customer_balance",
+        entityId: item.id,
+        title: `Review ${item.name} balance`,
+        detail: "Customer has an unpaid balance.",
+        dueAt: asDate(item.oldestChargeDate),
+        valueCents: Number(item.balanceCents)
+      }))
+    ];
     data(res, {
       activeEmployees,
       activeCustomers,
@@ -319,7 +457,8 @@ export function createReportingRouter({ pool }) {
       unassignedBookings,
       openRoutes,
       unpaidBalanceCents,
-      pendingNotifications
+      pendingNotifications,
+      actionItems
     });
   }));
 

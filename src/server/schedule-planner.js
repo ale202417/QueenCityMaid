@@ -826,7 +826,7 @@ async function flexibleServices(client, organizationId, reference) {
     });
 }
 
-async function syncAlternatingWeeks(pool, auth, reference) {
+export async function syncAlternatingWeeks(pool, auth, reference) {
   return transaction(pool, async (client) => {
     const currentMonday = mondayFor(reference);
     const rangeStart = currentMonday;

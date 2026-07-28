@@ -10,7 +10,8 @@ Status values: `todo`, `in_progress`, `done`.
 | Authentication | Valid and invalid sign-in, session refresh, sign-out | done | done | done |
 | Permissions | Manager, captain, and cleaner see only allowed modules and actions | done | done | done |
 | Navigation | Every desktop and mobile module opens without page, console, or request errors | n/a | done | done |
-| Dashboard | Counts and current-period financial totals load and agree with source records | done | done | done |
+| Dashboard | Counts, financial totals, and named manager action records agree with source records | done | done | done |
+| Automations | Schedule upkeep, consented reminders, daily claims, manual runs, recovery, and history | done | done | done |
 | Leads | Create, edit, assign, follow up, quote, convert, close, and reopen | done | done | done |
 | Customers | Create, edit, frequency/payment details, notes, cancel, pause, resume, and reactivate | done | done | done |
 | Properties | Create, edit, delete with dependency protection, access details | done | done | done |

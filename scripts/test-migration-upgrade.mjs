@@ -30,7 +30,7 @@ try {
       applied_at timestamptz NOT NULL DEFAULT now()
     )
   `);
-  const previousRelease = "012_booking_cancellation_reason.sql";
+  const previousRelease = "013_finance_corrections.sql";
   const files = (await readdir(migrationsDir))
     .filter(name => name.endsWith(".sql") && name <= previousRelease)
     .sort();
@@ -98,6 +98,13 @@ try {
     [context.user_id]
   );
   const migrations = await db.query("SELECT count(*)::int AS count FROM schema_migrations");
+  const automationSettings = await db.query(
+    `SELECT schedule_automation_enabled, service_reminder_automation_enabled,
+            payment_reminder_automation_enabled
+     FROM business_settings
+     WHERE organization_id = $1`,
+    [context.organization_id]
+  );
   if (
     payment.rows[0]?.status !== "recorded"
     || payment.rows[0]?.amount_cents !== 22000
@@ -107,9 +114,12 @@ try {
     || charge.rows[0]?.amount_cents !== 22000
     || user.rows[0]?.email !== context.email
     || user.rows[0]?.must_change_password !== false
-    || migrations.rows[0]?.count !== 13
+    || migrations.rows[0]?.count !== 14
+    || automationSettings.rows[0]?.schedule_automation_enabled !== true
+    || automationSettings.rows[0]?.service_reminder_automation_enabled !== false
+    || automationSettings.rows[0]?.payment_reminder_automation_enabled !== false
   ) {
-    throw new Error("Previous-release records were not preserved through migration 013");
+    throw new Error("Previous-release records were not preserved through migration 014");
   }
 
   await expectRejected(

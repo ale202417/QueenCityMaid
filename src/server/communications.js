@@ -73,7 +73,7 @@ async function consentedCustomer(pool, organizationId, customerId) {
   return result.rows[0];
 }
 
-async function queueNotification(pool, values) {
+export async function queueNotification(pool, values) {
   const id = crypto.randomUUID();
   try {
     await pool.query(
@@ -99,6 +99,145 @@ async function queueNotification(pool, values) {
     throw error;
   }
   return { id, status: "queued", dueAt: values.dueAt, duplicate: false };
+}
+
+function localDate(value, timeZone) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(value).map((part) => [part.type, part.value]));
+  return `${parts.year}-${parts.month}-${parts.day}`;
+}
+
+export async function queueAutomatedServiceReminders(
+  pool,
+  organizationId,
+  { now = new Date(), daysAhead = 14 } = {}
+) {
+  const organization = await pool.query(
+    "SELECT name, timezone FROM organizations WHERE id = $1",
+    [organizationId]
+  );
+  if (!organization.rowCount) {
+    throw new HttpError(404, "not_found", "Organization not found");
+  }
+  const through = new Date(now.getTime() + daysAhead * 24 * 60 * 60 * 1000);
+  const bookings = await pool.query(
+    `SELECT b.id, b.customer_id AS "customerId", b.scheduled_start AS "scheduledStart",
+            c.phone, p.address_line1 AS "addressLine1"
+     FROM bookings b
+     JOIN customers c
+       ON c.id = b.customer_id AND c.organization_id = b.organization_id
+     JOIN properties p
+       ON p.id = b.property_id AND p.organization_id = b.organization_id
+     WHERE b.organization_id = $1
+       AND b.status IN ('confirmed', 'assigned')
+       AND b.scheduled_start > $2 AND b.scheduled_start <= $3
+     ORDER BY b.scheduled_start`,
+    [organizationId, now, through]
+  );
+  const result = { queued: 0, existing: 0, skippedNoConsent: 0 };
+  for (const booking of bookings.rows) {
+    const consent = await pool.query(
+      `SELECT status FROM text_consents
+       WHERE organization_id = $1 AND customer_id = $2
+       ORDER BY recorded_at DESC LIMIT 1`,
+      [organizationId, booking.customerId]
+    );
+    if (consent.rows[0]?.status !== "granted") {
+      result.skippedNoConsent += 1;
+      continue;
+    }
+    const serviceTime = new Date(booking.scheduledStart);
+    const notification = await queueNotification(pool, {
+      organizationId,
+      customerId: booking.customerId,
+      bookingId: booking.id,
+      type: "service_reminder",
+      destination: booking.phone,
+      body: `${organization.rows[0].name} reminder: your cleaning at ${booking.addressLine1} is scheduled for ${serviceTime.toLocaleString("en-US", { timeZone: organization.rows[0].timezone, dateStyle: "medium", timeStyle: "short" })}. Reply to this message if anything has changed.`,
+      idempotencyKey: `booking-reminder:${booking.id}:${serviceTime.toISOString()}`,
+      dueAt: reminderDueAt(serviceTime)
+    });
+    result[notification.duplicate ? "existing" : "queued"] += 1;
+  }
+  return result;
+}
+
+export async function queueAutomatedPaymentReminders(
+  pool,
+  organizationId,
+  { now = new Date(), reminderDays = 7, timeZone = "America/New_York" } = {}
+) {
+  const customers = await pool.query(
+    `SELECT c.id, c.phone,
+            COALESCE(SUM(cc.amount_cents), 0)::integer AS "balanceCents",
+            COUNT(cc.id)::integer AS "serviceCount",
+            MIN(cc.charged_on) AS "oldestChargeDate"
+     FROM customers c
+     JOIN customer_charges cc
+       ON cc.customer_id = c.id AND cc.organization_id = c.organization_id
+     WHERE c.organization_id = $1 AND cc.status = 'unpaid'
+     GROUP BY c.id, c.phone
+     ORDER BY MIN(cc.charged_on)`,
+    [organizationId]
+  );
+  const cutoff = new Date(now.getTime() - reminderDays * 24 * 60 * 60 * 1000);
+  const runDate = localDate(now, timeZone);
+  const organization = await pool.query(
+    "SELECT name FROM organizations WHERE id = $1",
+    [organizationId]
+  );
+  const result = {
+    queued: 0,
+    existing: 0,
+    skippedNoConsent: 0,
+    skippedNotDue: 0
+  };
+  for (const customer of customers.rows) {
+    const oldestChargeDate = customer.oldestChargeDate instanceof Date
+      ? customer.oldestChargeDate.toISOString().slice(0, 10)
+      : String(customer.oldestChargeDate).slice(0, 10);
+    const oldestCharge = new Date(`${oldestChargeDate}T00:00:00.000Z`);
+    const latest = await pool.query(
+      `SELECT created_at AS "createdAt"
+       FROM notifications
+       WHERE organization_id = $1 AND customer_id = $2
+         AND type = 'payment_reminder'
+         AND status <> 'cancelled'
+       ORDER BY created_at DESC LIMIT 1`,
+      [organizationId, customer.id]
+    );
+    if (oldestCharge > cutoff || (latest.rowCount && new Date(latest.rows[0].createdAt) > cutoff)) {
+      result.skippedNotDue += 1;
+      continue;
+    }
+    const consent = await pool.query(
+      `SELECT status FROM text_consents
+       WHERE organization_id = $1 AND customer_id = $2
+       ORDER BY recorded_at DESC LIMIT 1`,
+      [organizationId, customer.id]
+    );
+    if (consent.rows[0]?.status !== "granted") {
+      result.skippedNoConsent += 1;
+      continue;
+    }
+    const balanceCents = Number(customer.balanceCents);
+    const serviceCount = Number(customer.serviceCount);
+    const notification = await queueNotification(pool, {
+      organizationId,
+      customerId: customer.id,
+      type: "payment_reminder",
+      destination: customer.phone,
+      body: `${organization.rows[0].name} payment reminder: A balance of $${(balanceCents / 100).toFixed(2)} is due for ${serviceCount} ${serviceCount === 1 ? "cleaning" : "cleanings"}. You can pay by Zelle, Venmo, PayPal, cash, or check. Reply to this message with any questions.`,
+      idempotencyKey: `payment-reminder-auto:${customer.id}:${runDate}`,
+      dueAt: now
+    });
+    result[notification.duplicate ? "existing" : "queued"] += 1;
+  }
+  return result;
 }
 
 export async function sendDueNotifications(pool, sender, now = new Date()) {

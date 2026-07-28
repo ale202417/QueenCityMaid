@@ -12,6 +12,7 @@ import {
   requireRole
 } from "./auth.js";
 import { createAccountRouter } from "./accounts.js";
+import { createAutomationRouter } from "./automation.js";
 import { withTransaction } from "./db.js";
 import { hashPassword, verifyPassword } from "./passwords.js";
 import {
@@ -289,6 +290,7 @@ export function createApp({
   app.use("/api", createDispatchRouter({ pool }));
   app.use("/api", createResourceRouter({ pool }));
   app.use("/api", createCommunicationRouter({ pool, sender: smsSender }));
+  app.use("/api", createAutomationRouter({ pool, sender: smsSender }));
   app.use("/api", createReportingRouter({ pool }));
   app.use("/api", createAccountRouter({ pool }));
   app.use("/api", createFinanceRouter({ pool }));

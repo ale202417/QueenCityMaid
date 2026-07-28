@@ -70,6 +70,7 @@ describe("dashboard, reports, and settings", () => {
     assert.equal(dashboard.body.data.wagesPayPeriodCents, 0);
     assert.equal(dashboard.body.data.clientCreditsCents, 0);
     assert.equal(dashboard.body.data.unpaidBalanceCents, 0);
+    assert.deepEqual(dashboard.body.data.actionItems, []);
   });
 
   it("updates validated business settings with an audit event", async () => {
@@ -78,11 +79,15 @@ describe("dashboard, reports, and settings", () => {
       method: "PATCH",
       body: JSON.stringify({
         hourlyTeamRateCents: 10900,
-        captainReimbursementCents: 1600
+        captainReimbursementCents: 1600,
+        serviceReminderAutomationEnabled: true,
+        automationRunTime: "06:30"
       })
     });
     assert.equal(updated.response.status, 200);
     assert.equal(updated.body.data.settings.hourlyTeamRateCents, 10900);
+    assert.equal(updated.body.data.settings.serviceReminderAutomationEnabled, true);
+    assert.equal(updated.body.data.settings.automationRunTime, "06:30");
     const audit = await pool.query(
       "SELECT action FROM audit_events WHERE organization_id = $1",
       [organizationId]
@@ -93,6 +98,54 @@ describe("dashboard, reports, and settings", () => {
       method: "PATCH", body: JSON.stringify({ responseTargetMinutes: 0 })
     });
     assert.equal(invalid.response.status, 400);
+    const invalidTime = await request("/api/settings", {
+      method: "PATCH", body: JSON.stringify({ automationRunTime: "25:00" })
+    });
+    assert.equal(invalidTime.response.status, 400);
+  });
+
+  it("returns named action-center records without leaking another company", async () => {
+    const { pool, organizationId, request } = await fixture();
+    const customer = await pool.query(
+      "SELECT id FROM customers WHERE organization_id = $1",
+      [organizationId]
+    );
+    await pool.query(
+      `INSERT INTO customer_charges
+       (id, organization_id, customer_id, type, description, amount_cents, status, charged_on)
+       VALUES ($1, $2, $3, 'service', 'Regular cleaning', 17500, 'unpaid', '2026-07-01')`,
+      [crypto.randomUUID(), organizationId, customer.rows[0].id]
+    );
+    await pool.query(
+      `INSERT INTO notifications
+       (id, organization_id, customer_id, type, channel, destination, body,
+        status, idempotency_key, due_at, failure_reason)
+       VALUES ($1, $2, $3, 'payment_reminder', 'sms', '7045551000', 'Reminder',
+               'failed', $4, now(), 'provider unavailable')`,
+      [crypto.randomUUID(), organizationId, customer.rows[0].id, crypto.randomUUID()]
+    );
+    const other = crypto.randomUUID();
+    await pool.query("INSERT INTO organizations (id, name) VALUES ($1, 'Other')", [other]);
+    await pool.query(
+      `INSERT INTO notifications
+       (id, organization_id, type, channel, destination, body, status,
+        idempotency_key, due_at, failure_reason)
+       VALUES ($1, $2, 'test', 'sms', '1', 'Secret', 'failed', $3, now(), 'secret')`,
+      [crypto.randomUUID(), other, crypto.randomUUID()]
+    );
+
+    const dashboard = await request("/api/dashboard");
+    assert.equal(dashboard.response.status, 200);
+    const items = dashboard.body.data.actionItems;
+    assert.deepEqual(
+      items.map((item) => item.kind).sort(),
+      ["customer_balance", "failed_message"]
+    );
+    assert(items.every((item) => item.title.includes("Jordan")));
+    assert.equal(
+      items.find((item) => item.kind === "customer_balance").valueCents,
+      17500
+    );
   });
 
   it("validates report ranges and returns empty operational totals", async () => {

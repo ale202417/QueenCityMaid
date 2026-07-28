@@ -18,6 +18,7 @@
 | `SESSION_COOKIE_SECURE` | Must be `true` behind production HTTPS |
 | `TRUST_PROXY` | Set `true` when one trusted proxy sits in front of Node |
 | `RUN_MIGRATIONS_ON_START` | Use `false` in production; migrations run before deployment |
+| `AUTOMATION_WORKER_ENABLED` | Set `true` to run each organization's enabled daily operations |
 | `BACKUP_RETENTION_DAYS` | Local verified-backup retention; defaults to `30` |
 | `SMS_WEBHOOK_URL` | HTTPS endpoint that accepts `{to, body, idempotencyKey}` |
 | `SMS_WEBHOOK_TOKEN` | Bearer credential for the SMS endpoint |
@@ -122,7 +123,8 @@ off-machine backups and point-in-time recovery.
 3. Sign in as the seeded manager and create the other manager and cleaner
    accounts.
 4. Import or enter current customers, properties, employees, rates, and teams.
-5. Confirm business settings and record text consent before enabling reminders.
+5. Confirm business and automation settings and record text consent before
+   enabling customer reminders.
 6. Configure the SMS webhook and send a controlled test message.
 7. Verify the next two weeks of bookings and routes before staff use begins.
 
@@ -130,7 +132,7 @@ off-machine backups and point-in-time recovery.
 
 - Run encrypted database backups daily and test restoration quarterly.
 - Retain payroll exports and audit events according to the accountant's policy.
-- Review failed notifications each workday.
+- Review the dashboard Action Center and failed notifications each workday.
 - Rotate database and SMS credentials immediately after any suspected exposure.
 - Apply OS, Node, and dependency updates in a tested release.
 

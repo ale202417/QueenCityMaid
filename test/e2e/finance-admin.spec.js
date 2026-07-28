@@ -25,7 +25,9 @@ test("manager queues, filters, and cancels a customer message", async ({ page })
 
   await openManagerPage(page, "Messages");
   await page.getByLabel("Filter message status").selectOption("queued");
-  const message = page.locator(".message-table .data-row").filter({ hasText: "Jordan Ellis" });
+  const message = page.locator(".message-table .data-row")
+    .filter({ hasText: "Jordan Ellis" })
+    .filter({ hasText: "$220.00" });
   await expect(message).toContainText("$220.00");
   await message.getByRole("button", { name: "Cancel" }).click();
   await expect(page.getByText("Message cancelled.")).toBeVisible();
