@@ -43,7 +43,7 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 35 | Individual multi-date services and scoped recurring date moves | 34 | done |
 | 36 | End-to-end manager module audit and P0-P2 repairs | 35 | done |
 | 37 | Reversible admin controls and record-level history | 36 | done |
-| 38 | Final migration, CI, deployment, and production smoke gates | 37 | in_progress |
+| 38 | Final migration, CI, deployment, and production smoke gates | 37 | done |
 
 ## Decisions
 
@@ -209,6 +209,14 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   service tips, message retry, expense correction, imports, and audit history:
   passing in the browser suite.
 - Production dependency audit at high severity: 0 known vulnerabilities.
+- Render logical database export created before migration 013; the managed
+  database also retained its three-day point-in-time recovery window.
+- GitHub CI run 11 passed the API, PostgreSQL upgrade, production build, and
+  Playwright gates for commit `46ea5fe`.
+- Render pre-deploy environment validation and migration 013 completed, the
+  internal health check passed, and commit `46ea5fe` became live.
+- External HTTPS health, cache-control, server-signature, application-shell,
+  live sign-in-screen, and browser-console smoke checks: passing.
 
 ## Definition of Done
 

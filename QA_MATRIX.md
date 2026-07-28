@@ -39,7 +39,7 @@ Status values: `todo`, `in_progress`, `done`.
 | Responsive UI | Every manager module and field workflow works at desktop and 390px mobile width | n/a | done | done |
 | Privacy | No cross-role or cross-organization data exposure in API or rendered UI | done | done | done |
 | Migration safety | Clean install and PostgreSQL previous-release upgrade preserve data | done | n/a | done |
-| Production smoke | Health, protected API headers, and static app after deploy | done | partial | in_progress |
+| Production smoke | Health, protected API headers, static app, sign-in screen, and console after deploy | done | done | done |
 
 ## Release Gates
 
