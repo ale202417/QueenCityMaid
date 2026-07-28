@@ -25,7 +25,8 @@ const syncInput = z.object({
 const moveInput = z.object({
   teamId: uuid.nullable(),
   date: dateOnly,
-  startTime: block
+  startTime: block,
+  updateScope: z.enum(["single", "future"]).default("single")
 }).strict();
 
 const placeInput = z.object({
@@ -38,6 +39,11 @@ const placeInput = z.object({
 const cancelInput = z.object({
   reason: z.string().trim().max(1000).optional().default(""),
   applyFee: z.boolean().default(false)
+}).strict();
+const restoreInput = z.object({
+  date: dateOnly,
+  startTime: block,
+  teamId: uuid.nullable()
 }).strict();
 
 const historyQuery = z.object({
@@ -157,6 +163,49 @@ function nextFlexibleOccurrence(startsOn, recurrenceRule, reference, booked) {
     .find((value) => nearestWeekday(value) >= reference && !booked.has(value)) || null;
 }
 
+function daysBetween(from, to) {
+  return Math.round((date(to) - date(from)) / DAY_MS);
+}
+
+function recurringMovePlan(recurrenceRule, oldDueDate, newDate, count) {
+  if (recurrenceRule.type === "dates") {
+    const offset = daysBetween(oldDueDate, newDate);
+    const dates = recurrenceRule.dates.map((value) =>
+      value < oldDueDate ? value : addDays(value, offset)
+    ).sort();
+    if (new Set(dates).size !== dates.length) {
+      throw new HttpError(
+        409,
+        "schedule_conflict",
+        "Moving the series would create duplicate individual service dates"
+      );
+    }
+    return {
+      recurrenceRule: { type: "dates", dates },
+      startsOn: dates[0],
+      dates: dates.filter((value) => value >= newDate).slice(0, count)
+    };
+  }
+
+  let nextRule = recurrenceRule;
+  if (recurrenceRule.type === "monthly") {
+    nextRule = { type: "monthly", dayOfMonth: date(newDate).getUTCDate() };
+  }
+  if (recurrenceRule.type === "nth_weekday") {
+    const selected = date(newDate);
+    nextRule = {
+      type: "nth_weekday",
+      weekday: selected.getUTCDay(),
+      occurrence: Math.ceil(selected.getUTCDate() / 7)
+    };
+  }
+  return {
+    recurrenceRule: nextRule,
+    startsOn: newDate,
+    dates: recurrenceDates(newDate, nextRule, count)
+  };
+}
+
 async function transaction(pool, work) {
   const client = await pool.connect();
   try {
@@ -260,7 +309,7 @@ async function reorderRoute(client, routeId) {
   }
 }
 
-async function detachBooking(client, organizationId, bookingId) {
+export async function detachBooking(client, organizationId, bookingId) {
   const routes = await client.query(
     `SELECT route_id AS "routeId"
      FROM route_stops
@@ -282,7 +331,90 @@ async function detachBooking(client, organizationId, bookingId) {
   }
 }
 
+async function schedulePlacement({
+  client,
+  organizationId,
+  teamId,
+  serviceDate,
+  scheduledStart,
+  bookingId = null
+}) {
+  const team = await activeTeam(client, organizationId, teamId, serviceDate);
+  const occupiedParams = [organizationId, teamId, serviceDate, scheduledStart];
+  const excludeCurrent = bookingId ? "AND b.id <> $5" : "";
+  if (bookingId) occupiedParams.push(bookingId);
+  const occupied = await client.query(
+    `SELECT 1
+     FROM route_stops rs
+     JOIN routes r ON r.id = rs.route_id
+     JOIN bookings b ON b.id = rs.booking_id
+     WHERE rs.organization_id = $1 AND r.team_id = $2
+       AND r.service_date = $3 AND b.scheduled_start = $4
+       ${excludeCurrent}
+       AND b.status NOT IN ('cancelled', 'rescheduled', 'unable_to_complete')
+     LIMIT 1`,
+    occupiedParams
+  );
+  if (occupied.rowCount) {
+    throw new HttpError(
+      409,
+      "schedule_conflict",
+      "That crew already has a service in this time block"
+    );
+  }
+  const route = await client.query(
+    `SELECT id, status FROM routes
+     WHERE organization_id = $1 AND team_id = $2 AND service_date = $3`,
+    [organizationId, teamId, serviceDate]
+  );
+  if (route.rowCount && ["in_progress", "completed"].includes(route.rows[0].status)) {
+    throw new HttpError(
+      409,
+      "route_locked",
+      "Started or completed routes cannot accept another service"
+    );
+  }
+  return { route, team };
+}
+
+export async function validateSchedulePlacement({
+  client,
+  organizationId,
+  teamId,
+  serviceDate,
+  startTime
+}) {
+  const scheduledStart = zonedDateTime(
+    serviceDate,
+    startTime,
+    await timezone(client, organizationId)
+  );
+  await schedulePlacement({
+    client,
+    organizationId,
+    teamId,
+    serviceDate,
+    scheduledStart
+  });
+}
+
 async function assignBooking(client, organizationId, bookingId, teamId, serviceDate) {
+  const booking = await client.query(
+    `SELECT scheduled_start, expected_duration_minutes
+     FROM bookings WHERE id = $1 AND organization_id = $2`,
+    [bookingId, organizationId]
+  );
+  let placement = null;
+  if (teamId) {
+    placement = await schedulePlacement({
+      client,
+      organizationId,
+      teamId,
+      serviceDate,
+      scheduledStart: booking.rows[0].scheduled_start,
+      bookingId
+    });
+  }
   await detachBooking(client, organizationId, bookingId);
   if (!teamId) {
     await client.query(
@@ -293,42 +425,32 @@ async function assignBooking(client, organizationId, bookingId, teamId, serviceD
     return null;
   }
 
-  const team = await activeTeam(client, organizationId, teamId, serviceDate);
-  const booking = await client.query(
-    `SELECT scheduled_start, expected_duration_minutes
-     FROM bookings WHERE id = $1 AND organization_id = $2`,
-    [bookingId, organizationId]
-  );
-  const occupied = await client.query(
-    `SELECT 1
-     FROM route_stops rs
-     JOIN routes r ON r.id = rs.route_id
-     JOIN bookings b ON b.id = rs.booking_id
-     WHERE rs.organization_id = $1 AND r.team_id = $2
-       AND r.service_date = $3 AND b.scheduled_start = $4
-       AND b.id <> $5
-       AND b.status NOT IN ('cancelled', 'rescheduled', 'unable_to_complete')
-     LIMIT 1`,
-    [organizationId, teamId, serviceDate, booking.rows[0].scheduled_start, bookingId]
-  );
-  if (occupied.rowCount) {
-    throw new HttpError(409, "schedule_conflict", "That crew already has a service in this time block");
-  }
-  let route = await client.query(
-    `SELECT id FROM routes
-     WHERE organization_id = $1 AND team_id = $2 AND service_date = $3`,
-    [organizationId, teamId, serviceDate]
-  );
+  let { route } = placement;
   if (!route.rowCount) {
     route = await client.query(
       `INSERT INTO routes
        (id, organization_id, team_id, captain_employee_id, service_date, status)
        VALUES ($1, $2, $3, $4, $5, 'draft')
        RETURNING id`,
-      [crypto.randomUUID(), organizationId, teamId, team.captainEmployeeId, serviceDate]
+      [
+        crypto.randomUUID(),
+        organizationId,
+        teamId,
+        placement.team.captainEmployeeId,
+        serviceDate
+      ]
     );
   }
   const routeId = route.rows[0].id;
+  await client.query(
+    `UPDATE routes
+     SET status = CASE WHEN status = 'finalized' THEN 'draft' ELSE status END,
+         finalized_by = CASE WHEN status = 'finalized' THEN NULL ELSE finalized_by END,
+         finalized_at = CASE WHEN status = 'finalized' THEN NULL ELSE finalized_at END,
+         updated_at = now()
+     WHERE id = $1`,
+    [routeId]
+  );
   const count = await client.query(
     "SELECT COUNT(*) AS count FROM route_stops WHERE route_id = $1",
     [routeId]
@@ -347,7 +469,7 @@ async function assignBooking(client, organizationId, bookingId, teamId, serviceD
       Number(count.rows[0].count) + 1, arrival, departure
     ]
   );
-  for (const member of team.members) {
+  for (const member of placement.team.members) {
     await client.query(
       `INSERT INTO job_assignments (booking_id, employee_id, role)
        VALUES ($1, $2, $3)
@@ -355,7 +477,7 @@ async function assignBooking(client, organizationId, bookingId, teamId, serviceD
       [
         bookingId,
         member.id,
-        member.id === team.captainEmployeeId ? "captain" : "cleaner"
+        member.id === placement.team.captainEmployeeId ? "captain" : "cleaner"
       ]
     );
   }
@@ -366,6 +488,209 @@ async function assignBooking(client, organizationId, bookingId, teamId, serviceD
   );
   await reorderRoute(client, routeId);
   return routeId;
+}
+
+export async function moveBookingInTransaction({
+  client,
+  auth,
+  bookingId,
+  date: requestedDate,
+  startTime: requestedStartTime,
+  teamId: requestedTeamId,
+  updateScope = "single"
+}) {
+  const current = await client.query(
+    `SELECT b.*, r.team_id
+     FROM bookings b
+     LEFT JOIN route_stops rs ON rs.booking_id = b.id
+     LEFT JOIN routes r ON r.id = rs.route_id
+     WHERE b.id = $1 AND b.organization_id = $2`,
+    [bookingId, auth.organizationId]
+  );
+  if (!current.rowCount) throw new HttpError(404, "not_found", "Booking not found");
+  const before = current.rows[0];
+  if (["in_progress", "completed"].includes(before.status)) {
+    throw new HttpError(409, "invalid_state", "Started or completed service cannot be moved");
+  }
+  const organizationTimezone = await timezone(client, auth.organizationId);
+  const beforeDate = databaseDate(before.service_date || before.scheduled_start);
+  const today = todayInTimezone(organizationTimezone);
+  if (beforeDate < today) {
+    throw new HttpError(409, "invalid_state", "Past service cannot be moved");
+  }
+  const targetDate = requestedDate || beforeDate;
+  const targetStartTime = requestedStartTime || localTime(
+    before.scheduled_start,
+    organizationTimezone
+  );
+  const targetTeamId = requestedTeamId !== undefined
+    ? requestedTeamId
+    : before.team_id || null;
+
+  if (updateScope === "single") {
+    const scheduledStart = zonedDateTime(targetDate, targetStartTime, organizationTimezone);
+    await client.query(
+      `UPDATE bookings
+       SET scheduled_start = $3, service_date = $4, status = 'confirmed', updated_at = now()
+       WHERE id = $1 AND organization_id = $2`,
+      [bookingId, auth.organizationId, scheduledStart, targetDate]
+    );
+    const routeId = await assignBooking(
+      client,
+      auth.organizationId,
+      bookingId,
+      targetTeamId,
+      targetDate
+    );
+    await recordAudit(client, auth, {
+      entityType: "booking",
+      entityId: bookingId,
+      action: "schedule_move",
+      before,
+      after: {
+        updateScope,
+        date: targetDate,
+        startTime: targetStartTime,
+        teamId: targetTeamId,
+        routeId
+      }
+    });
+    return {
+      id: bookingId,
+      routeId,
+      teamId: targetTeamId,
+      serviceDate: targetDate,
+      startTime: targetStartTime,
+      updateScope,
+      bookingsMoved: 1
+    };
+  }
+
+  if (!before.recurring_service_id) {
+    throw new HttpError(
+      400,
+      "validation_error",
+      "This booking is not part of a recurring service"
+    );
+  }
+  const recurringResult = await client.query(
+    `SELECT * FROM recurring_services
+     WHERE id = $1 AND organization_id = $2`,
+    [before.recurring_service_id, auth.organizationId]
+  );
+  if (!recurringResult.rowCount) {
+    throw new HttpError(404, "not_found", "Recurring service not found");
+  }
+  const recurring = recurringResult.rows[0];
+  const oldDueDate = databaseDate(before.recurrence_due_date || beforeDate);
+  const future = await client.query(
+    `SELECT b.id, b.status, b.scheduled_start, b.recurrence_due_date,
+            COALESCE(b.service_date, CAST(b.scheduled_start AS date)) AS service_date
+     FROM bookings b
+     WHERE b.organization_id = $1 AND b.recurring_service_id = $2
+       AND b.status IN ('requested', 'confirmed', 'assigned')
+       AND COALESCE(b.recurrence_due_date, b.service_date, CAST(b.scheduled_start AS date)) >= $3
+     ORDER BY COALESCE(b.recurrence_due_date, b.service_date, CAST(b.scheduled_start AS date)),
+              b.scheduled_start, b.id`,
+    [auth.organizationId, before.recurring_service_id, oldDueDate]
+  );
+  if (!future.rows.some((booking) => booking.id === bookingId)) {
+    throw new HttpError(
+      409,
+      "invalid_state",
+      "Only upcoming recurring services can update future visits"
+    );
+  }
+  const plan = recurringMovePlan(
+    rule(recurring),
+    oldDueDate,
+    targetDate,
+    future.rowCount
+  );
+  if (plan.dates.length < future.rowCount) {
+    throw new HttpError(
+      409,
+      "invalid_schedule",
+      "The recurring schedule does not contain enough future dates"
+    );
+  }
+  if (plan.recurrenceRule.type === "nth_weekday") {
+    const { occurrence, weekday } = plan.recurrenceRule;
+    if (weekday === 0 || weekday === 6 || occurrence > 4) {
+      throw new HttpError(
+        400,
+        "validation_error",
+        "Monthly weekday services must use the first through fourth Monday-Friday"
+      );
+    }
+  }
+
+  await client.query(
+    `UPDATE recurring_services
+     SET recurrence_rule = $1, starts_on = $2, preferred_start_time = $3,
+         preferred_team_id = $4, updated_at = now()
+     WHERE id = $5 AND organization_id = $6`,
+    [
+      JSON.stringify(plan.recurrenceRule),
+      plan.startsOn,
+      targetStartTime,
+      targetTeamId,
+      recurring.id,
+      auth.organizationId
+    ]
+  );
+  for (const booking of future.rows) {
+    await client.query(
+      "UPDATE bookings SET recurrence_due_date = NULL WHERE id = $1",
+      [booking.id]
+    );
+  }
+  for (const [index, booking] of future.rows.entries()) {
+    const dueDate = plan.dates[index];
+    const serviceDate = nearestWeekday(dueDate);
+    const scheduledStart = zonedDateTime(
+      serviceDate,
+      targetStartTime,
+      organizationTimezone
+    );
+    await client.query(
+      `UPDATE bookings
+       SET scheduled_start = $2, service_date = $3, recurrence_due_date = $4,
+           status = 'confirmed', updated_at = now()
+       WHERE id = $1`,
+      [booking.id, scheduledStart, serviceDate, dueDate]
+    );
+    await assignBooking(
+      client,
+      auth.organizationId,
+      booking.id,
+      targetTeamId,
+      serviceDate
+    );
+  }
+  await recordAudit(client, auth, {
+    entityType: "recurringService",
+    entityId: recurring.id,
+    action: "schedule_move_future",
+    before,
+    after: {
+      updateScope,
+      startsOn: plan.startsOn,
+      recurrenceRule: plan.recurrenceRule,
+      startTime: targetStartTime,
+      teamId: targetTeamId,
+      bookingsMoved: future.rowCount
+    }
+  });
+  return {
+    id: bookingId,
+    routeId: null,
+    teamId: targetTeamId,
+    serviceDate: nearestWeekday(plan.dates[0]),
+    startTime: targetStartTime,
+    updateScope,
+    bookingsMoved: future.rowCount
+  };
 }
 
 async function insertRecurringBooking(client, organizationId, recurring, dueDate, serviceDate, startTime) {
@@ -551,6 +876,7 @@ async function planner(pool, organizationId, key, reference) {
               b.expected_duration_minutes AS "expectedDurationMinutes",
               b.price_cents AS "priceCents", b.billing_type AS "billingType",
               b.billing_rate_cents AS "billingRateCents",
+              b.customer_id AS "customerId", b.property_id AS "propertyId",
               b.service_type_id AS "serviceTypeId",
               b.special_requests AS "specialInstructions",
               b.recurring_service_id AS "recurringServiceId",
@@ -558,7 +884,8 @@ async function planner(pool, organizationId, key, reference) {
               p.address_line2 AS "addressLine2", p.city, p.state,
               p.postal_code AS "postalCode",
               st.name AS "serviceName", r.team_id AS "teamId", t.name AS "teamName",
-              rs.route_id AS "routeId", rs.stop_order AS "stopOrder"
+              rs.route_id AS "routeId", rs.stop_order AS "stopOrder",
+              r.status AS "routeStatus"
        FROM bookings b
        JOIN customers c ON c.id = b.customer_id
        JOIN properties p ON p.id = b.property_id
@@ -631,49 +958,15 @@ export function createScheduleRouter({ pool }) {
     const bookingId = validate(uuid, req.params.id);
     const input = validate(moveInput, req.body);
     const moved = await transaction(pool, async (client) => {
-      const before = await client.query(
-        `SELECT * FROM bookings WHERE id = $1 AND organization_id = $2`,
-        [bookingId, req.auth.organizationId]
-      );
-      if (!before.rowCount) throw new HttpError(404, "not_found", "Booking not found");
-      if (["in_progress", "completed"].includes(before.rows[0].status)) {
-        throw new HttpError(409, "invalid_state", "Started or completed service cannot be moved");
-      }
-      const beforeDate = databaseDate(
-        before.rows[0].service_date || before.rows[0].scheduled_start
-      );
-      const today = todayInTimezone(await timezone(client, req.auth.organizationId));
-      if (beforeDate < today) {
-        throw new HttpError(409, "invalid_state", "Past service cannot be moved");
-      }
-      const scheduledStart = zonedDateTime(
-        input.date,
-        input.startTime,
-        await timezone(client, req.auth.organizationId)
-      );
-      await client.query(
-        `UPDATE bookings
-         SET scheduled_start = $3, service_date = $4, status = 'confirmed', updated_at = now()
-         WHERE id = $1 AND organization_id = $2`,
-        [bookingId, req.auth.organizationId, scheduledStart, input.date]
-      );
-      const routeId = await assignBooking(
-        client, req.auth.organizationId, bookingId, input.teamId, input.date
-      );
-      await recordAudit(client, req.auth, {
-        entityType: "booking",
-        entityId: bookingId,
-        action: "schedule_move",
-        before: before.rows[0],
-        after: { ...input, routeId }
-      });
-      return {
-        id: bookingId,
-        routeId,
+      return moveBookingInTransaction({
+        client,
+        auth: req.auth,
+        bookingId,
+        date: input.date,
+        startTime: input.startTime,
         teamId: input.teamId,
-        serviceDate: input.date,
-        startTime: input.startTime
-      };
+        updateScope: input.updateScope
+      });
     });
     data(res, { booking: moved });
   }));
@@ -788,6 +1081,119 @@ export function createScheduleRouter({ pool }) {
       cancellationFeeCents: cancelled.cancellationFeeCents,
       cancellationChargeId: cancelled.chargeId
     });
+  }));
+
+  router.post("/schedule-planner/bookings/:id/restore", asyncRoute(async (req, res) => {
+    const bookingId = validate(uuid, req.params.id);
+    const input = validate(restoreInput, req.body);
+    const restored = await transaction(pool, async (client) => {
+      const result = await client.query(
+        `SELECT b.*, c.status AS customer_status
+         FROM bookings b
+         JOIN customers c
+           ON c.id = b.customer_id AND c.organization_id = b.organization_id
+         WHERE b.id = $1 AND b.organization_id = $2`,
+        [bookingId, req.auth.organizationId]
+      );
+      if (!result.rowCount) throw new HttpError(404, "not_found", "Booking not found");
+      const before = result.rows[0];
+      if (before.status !== "cancelled") {
+        throw new HttpError(409, "invalid_state", "Only a cancelled visit can be restored");
+      }
+      if (before.customer_status !== "active") {
+        throw new HttpError(409, "customer_inactive", "Reactivate the customer before restoring a visit");
+      }
+      const organizationTimezone = await timezone(client, req.auth.organizationId);
+      if (input.date < todayInTimezone(organizationTimezone)) {
+        throw new HttpError(400, "validation_error", "Restored visits must use today or a future date");
+      }
+      const scheduledStart = zonedDateTime(
+        input.date,
+        input.startTime,
+        organizationTimezone
+      );
+      if (input.teamId) {
+        await schedulePlacement({
+          client,
+          organizationId: req.auth.organizationId,
+          teamId: input.teamId,
+          serviceDate: input.date,
+          scheduledStart,
+          bookingId
+        });
+      }
+
+      const fee = await client.query(
+        `SELECT c.id, c.status, COALESCE(SUM(pa.amount_cents), 0) AS allocated_cents
+         FROM customer_charges c
+         LEFT JOIN payment_allocations pa
+           ON pa.charge_id = c.id AND pa.reversed_at IS NULL
+         WHERE c.organization_id = $1 AND c.booking_id = $2
+           AND c.type = 'cancellation_fee'
+         GROUP BY c.id, c.status
+         ORDER BY c.created_at
+         LIMIT 1`,
+        [req.auth.organizationId, bookingId]
+      );
+      const feeCanBeWaived = fee.rows[0]?.status === "unpaid"
+        && Number(fee.rows[0]?.allocated_cents || 0) === 0;
+      if (feeCanBeWaived) {
+        await client.query(
+          `UPDATE customer_charges SET status = 'waived'
+           WHERE id = $1 AND organization_id = $2`,
+          [fee.rows[0].id, req.auth.organizationId]
+        );
+      }
+
+      await client.query(
+        `UPDATE bookings
+         SET status = 'confirmed', scheduled_start = $3, service_date = $4,
+             cancellation_reason = NULL,
+             cancellation_fee_waived = $5,
+             cancellation_waiver_reason = CASE WHEN $5 THEN 'Visit restored' ELSE NULL END,
+             updated_at = now()
+         WHERE id = $1 AND organization_id = $2`,
+        [
+          bookingId,
+          req.auth.organizationId,
+          scheduledStart,
+          input.date,
+          feeCanBeWaived
+        ]
+      );
+      const routeId = await assignBooking(
+        client,
+        req.auth.organizationId,
+        bookingId,
+        input.teamId,
+        input.date
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "booking",
+        entityId: bookingId,
+        action: "restore_visit",
+        before,
+        after: {
+          date: input.date,
+          startTime: input.startTime,
+          teamId: input.teamId,
+          routeId,
+          cancellationFeeWaived: feeCanBeWaived,
+          preservedPaidFee: Boolean(fee.rowCount && !feeCanBeWaived)
+        }
+      });
+      return {
+        id: bookingId,
+        status: input.teamId ? "assigned" : "confirmed",
+        serviceDate: input.date,
+        startTime: input.startTime,
+        teamId: input.teamId,
+        routeId,
+        cancellationFeeWaived: feeCanBeWaived,
+        preservedPaidFee: Boolean(fee.rowCount && !feeCanBeWaived)
+      };
+    });
+    data(res, { booking: restored });
   }));
 
   router.get("/schedule-planner/others", asyncRoute(async (req, res) => {

@@ -41,6 +41,13 @@ const expenseSchema = z.object({
   description: z.string().trim().min(1).max(500),
   amountCents: z.number().int().positive().max(100_000_000)
 }).strict();
+const expenseUpdateSchema = expenseSchema.partial().refine(
+  (value) => Object.keys(value).length > 0,
+  "At least one field is required"
+);
+const expenseVoidSchema = z.object({
+  reason: z.string().trim().min(1).max(1000)
+}).strict();
 const settingsSchema = z.object({
   responseTargetMinutes: z.number().int().positive().max(1440).optional(),
   hourlyTeamRateCents: z.number().int().min(0).max(10_000_000).optional(),
@@ -103,7 +110,8 @@ async function financialSnapshot(pool, organizationId, from, to, payrollPeriodId
     pool.query(
       `SELECT COALESCE(SUM(amount_cents), 0) AS amount
        FROM payments
-       WHERE organization_id = $1 AND CAST(paid_at AS date) BETWEEN $2 AND $3`,
+       WHERE organization_id = $1 AND status = 'recorded'
+         AND CAST(paid_at AS date) BETWEEN $2 AND $3`,
       values
     ),
     pool.query(
@@ -116,7 +124,8 @@ async function financialSnapshot(pool, organizationId, from, to, payrollPeriodId
     pool.query(
       `SELECT COALESCE(SUM(pa.amount_cents), 0) AS amount
        FROM customer_charges c
-       JOIN payment_allocations pa ON pa.charge_id = c.id
+       JOIN payment_allocations pa
+         ON pa.charge_id = c.id AND pa.reversed_at IS NULL
        WHERE c.organization_id = $1 AND c.charged_on BETWEEN $2 AND $3
          AND c.status NOT IN ('waived', 'credited')`,
       values
@@ -125,6 +134,7 @@ async function financialSnapshot(pool, organizationId, from, to, payrollPeriodId
       `SELECT category, COALESCE(SUM(amount_cents), 0) AS amount_cents
        FROM business_expenses
        WHERE organization_id = $1 AND spent_on BETWEEN $2 AND $3
+         AND status = 'recorded'
        GROUP BY category ORDER BY category`,
       values
     ),
@@ -280,6 +290,7 @@ export function createReportingRouter({ pool }) {
       payPeriod
         ? scalar(pool, `SELECT COALESCE(SUM(amount_cents), 0) AS value FROM payments
                         WHERE organization_id = $1
+                          AND status = 'recorded'
                           AND CAST(paid_at AS date) BETWEEN $2 AND $3`,
         [organizationId, asDate(payPeriod.starts_on), asDate(payPeriod.ends_on)])
         : 0,
@@ -333,7 +344,8 @@ export function createReportingRouter({ pool }) {
       `SELECT COALESCE(SUM(amount_cents), 0)::integer AS "paidCents",
               COUNT(*)::integer AS "paymentCount"
        FROM payments
-       WHERE organization_id = $1 AND CAST(paid_at AS date) BETWEEN $2 AND $3`,
+       WHERE organization_id = $1 AND status = 'recorded'
+         AND CAST(paid_at AS date) BETWEEN $2 AND $3`,
       values
     );
     const labor = await pool.query(
@@ -452,7 +464,8 @@ export function createReportingRouter({ pool }) {
   router.get("/expenses", asyncRoute(async (req, res) => {
     const input = validate(rangeSchema, req.query);
     const result = await pool.query(
-      `SELECT id, spent_on, category, description, amount_cents, created_at
+      `SELECT id, spent_on, category, description, amount_cents, status,
+              voided_at, void_reason, created_at
        FROM business_expenses
        WHERE organization_id = $1 AND spent_on BETWEEN $2 AND $3
        ORDER BY spent_on DESC, created_at DESC`,
@@ -465,6 +478,9 @@ export function createReportingRouter({ pool }) {
         category: row.category,
         description: row.description,
         amountCents: Number(row.amount_cents),
+        status: row.status,
+        voidedAt: row.voided_at,
+        voidReason: row.void_reason,
         createdAt: row.created_at
       }))
     });
@@ -493,8 +509,97 @@ export function createReportingRouter({ pool }) {
       return result.rows[0].created_at;
     });
     data(res, {
-      expense: { id, ...input, createdAt }
+      expense: { id, ...input, status: "recorded", createdAt }
     }, 201);
+  }));
+
+  router.patch("/expenses/:id", asyncRoute(async (req, res) => {
+    const id = validate(z.string().uuid(), req.params.id);
+    const input = validate(expenseUpdateSchema, req.body);
+    const expense = await withTransaction(pool, async (client) => {
+      const before = await client.query(
+        "SELECT * FROM business_expenses WHERE id = $1 AND organization_id = $2",
+        [id, req.auth.organizationId]
+      );
+      if (!before.rowCount) throw new HttpError(404, "not_found", "Expense not found");
+      if (before.rows[0].status !== "recorded") {
+        throw new HttpError(409, "expense_voided", "A voided expense cannot be edited");
+      }
+      const columns = {
+        spentOn: "spent_on",
+        category: "category",
+        description: "description",
+        amountCents: "amount_cents"
+      };
+      const entries = Object.entries(input);
+      const values = entries.map(([, value]) => value);
+      values.push(id, req.auth.organizationId);
+      const result = await client.query(
+        `UPDATE business_expenses
+         SET ${entries.map(([key], index) => `${columns[key]} = $${index + 1}`).join(", ")}
+         WHERE id = $${values.length - 1} AND organization_id = $${values.length}
+         RETURNING *`,
+        values
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "business_expense",
+        entityId: id,
+        action: "update",
+        before: before.rows[0],
+        after: result.rows[0]
+      });
+      return result.rows[0];
+    });
+    data(res, {
+      expense: {
+        id: expense.id,
+        spentOn: asDate(expense.spent_on),
+        category: expense.category,
+        description: expense.description,
+        amountCents: Number(expense.amount_cents),
+        status: expense.status,
+        createdAt: expense.created_at
+      }
+    });
+  }));
+
+  router.post("/expenses/:id/void", asyncRoute(async (req, res) => {
+    const id = validate(z.string().uuid(), req.params.id);
+    const input = validate(expenseVoidSchema, req.body);
+    const expense = await withTransaction(pool, async (client) => {
+      const before = await client.query(
+        "SELECT * FROM business_expenses WHERE id = $1 AND organization_id = $2",
+        [id, req.auth.organizationId]
+      );
+      if (!before.rowCount) throw new HttpError(404, "not_found", "Expense not found");
+      if (before.rows[0].status === "voided") {
+        throw new HttpError(409, "expense_already_voided", "This expense is already voided");
+      }
+      const result = await client.query(
+        `UPDATE business_expenses
+         SET status = 'voided', voided_at = now(), voided_by = $3, void_reason = $4
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [id, req.auth.organizationId, req.auth.id, input.reason]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "business_expense",
+        entityId: id,
+        action: "void",
+        before: before.rows[0],
+        after: result.rows[0],
+        reason: input.reason
+      });
+      return result.rows[0];
+    });
+    data(res, {
+      expense: {
+        id: expense.id,
+        status: expense.status,
+        voidedAt: expense.voided_at,
+        voidReason: expense.void_reason
+      }
+    });
   }));
 
   router.get("/settings", asyncRoute(async (req, res) => {

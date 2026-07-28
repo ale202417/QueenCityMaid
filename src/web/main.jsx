@@ -16,6 +16,7 @@ const AuthContext = createContext(null);
 const managerRoutes = [
   { path: "/", label: "Dashboard" },
   { path: "/leads", label: "Leads" },
+  { path: "/quotes", label: "Quotes" },
   { path: "/customers", label: "Customers" },
   { path: "/schedule", label: "Schedule" },
   { path: "/employees", label: "Employees" },
@@ -211,6 +212,97 @@ function LoginScreen() {
   );
 }
 
+function TemporaryPasswordScreen({ user }) {
+  const auth = useAuth();
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setError("");
+    if (newPassword !== confirmPassword) {
+      setError("New passwords do not match.");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.post("/auth/change-password", { currentPassword, newPassword });
+      const refreshed = await api.me();
+      auth.setState({ status: "ready", user: refreshed, error: "" });
+    } catch (requestError) {
+      setError(requestError.message || "The password could not be changed.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function signOut() {
+    try {
+      await api.logout();
+    } finally {
+      auth.setState({ status: "ready", user: null, error: "" });
+    }
+  }
+
+  return (
+    <main className="login-page">
+      <section className="login-panel" aria-labelledby="temporary-password-title">
+        <div className="login-brand">
+          <img
+            alt="Queen City Maid LLC"
+            className="brand-logo login-logo"
+            src="/queen-city-maid-logo-transparent.png"
+          />
+          <button className="text-button" type="button" onClick={signOut}>Sign out</button>
+        </div>
+        <div className="login-heading">
+          <p className="eyebrow">Account security</p>
+          <h1 id="temporary-password-title">Create your password</h1>
+          <p>{user.name}, replace the temporary password before continuing.</p>
+        </div>
+        <form onSubmit={submit}>
+          <label htmlFor="temporary-current-password">Temporary password</label>
+          <input
+            autoComplete="current-password"
+            id="temporary-current-password"
+            required
+            type="password"
+            value={currentPassword}
+            onChange={(event) => setCurrentPassword(event.target.value)}
+          />
+          <label htmlFor="temporary-new-password">New password</label>
+          <input
+            autoComplete="new-password"
+            id="temporary-new-password"
+            minLength="12"
+            required
+            type="password"
+            value={newPassword}
+            onChange={(event) => setNewPassword(event.target.value)}
+          />
+          <label htmlFor="temporary-confirm-password">Confirm new password</label>
+          <input
+            autoComplete="new-password"
+            id="temporary-confirm-password"
+            minLength="12"
+            required
+            type="password"
+            value={confirmPassword}
+            onChange={(event) => setConfirmPassword(event.target.value)}
+          />
+          {error && <p className="form-error" role="alert">{error}</p>}
+          <button className="primary-button" disabled={saving} type="submit">
+            {saving ? "Changing password..." : "Create password"}
+          </button>
+        </form>
+      </section>
+    </main>
+  );
+}
+
 function NavLink({ route, currentPath, navigate, onNavigate }) {
   const active = route.path === currentPath;
 
@@ -376,6 +468,7 @@ function App() {
   const auth = useAuth();
   if (auth.status === "loading") return <LoadingScreen />;
   if (!auth.user) return <LoginScreen />;
+  if (auth.user.mustChangePassword) return <TemporaryPasswordScreen user={auth.user} />;
   return <AppShell user={auth.user} />;
 }
 

@@ -79,11 +79,11 @@ async function fixture(role = "manager") {
     `INSERT INTO team_members
      (team_id, employee_id, is_captain, effective_from)
      VALUES
-       ($1, $2, true, '2026-01-01'),
-       ($1, $3, false, '2026-01-01'),
-       ($4, $2, true, '2026-01-01'),
-       ($4, $3, false, '2026-01-01'),
-       ($5, $6, true, '2026-01-01')`,
+       ($1, $2, true, '2037-01-01'),
+       ($1, $3, false, '2037-01-01'),
+       ($4, $2, true, '2037-01-01'),
+       ($4, $3, false, '2037-01-01'),
+       ($5, $6, true, '2037-01-01')`,
     [
       id.teamA, id.captain, id.cleaner, id.teamB,
       id.foreignTeam, id.foreignEmployee
@@ -136,42 +136,42 @@ async function fixture(role = "manager") {
     [
       id.weeklyService, id.organizationA, id.weeklyCustomer, id.weeklyProperty,
       id.serviceType, id.teamA, "active", { type: "weekly", intervalWeeks: 1 },
-      "08:00", 150, 22000, "2026-07-27", "flat", 22000,
+      "08:00", 150, 22000, "2037-07-27", "flat", 22000,
       "Use the side entrance"
     ],
     [
       id.biweeklyService, id.organizationA, id.biweeklyCustomer, id.biweeklyProperty,
       id.serviceType, id.teamB, "active", { type: "weekly", intervalWeeks: 2 },
-      "10:30", 180, 0, "2026-07-27", "hourly", 9900,
+      "10:30", 180, 0, "2037-07-27", "hourly", 9900,
       "Call before arrival"
     ],
     [
       id.threeWeekService, id.organizationA, id.threeWeekCustomer, id.threeWeekProperty,
       id.serviceType, id.teamA, "active", { type: "weekly", intervalWeeks: 3 },
-      "13:00", 150, 24000, "2026-07-20", "flat", 24000,
+      "13:00", 150, 24000, "2037-07-20", "flat", 24000,
       "Gate code is 2468"
     ],
     [
       id.monthlyService, id.organizationA, id.monthlyCustomer, id.monthlyProperty,
       id.serviceType, id.teamA, "active", { type: "monthly", dayOfMonth: 15 },
-      "15:00", 180, 26000, "2026-07-15", "flat", 26000, ""
+      "15:00", 180, 26000, "2037-07-15", "flat", 26000, ""
     ],
     [
       id.nthService, id.organizationA, id.nthCustomer, id.nthProperty,
       id.serviceType, id.teamB, "active",
       { type: "nth_weekday", weekday: 2, occurrence: 2 },
-      "08:00", 120, 20000, "2026-07-01", "flat", 20000, ""
+      "08:00", 120, 20000, "2037-07-01", "flat", 20000, ""
     ],
     [
       id.pausedService, id.organizationA, id.weeklyCustomer, id.weeklyProperty,
       id.serviceType, id.teamA, "paused", { type: "weekly", intervalWeeks: 1 },
-      "15:00", 60, 10000, "2026-07-27", "flat", 10000, ""
+      "15:00", 60, 10000, "2037-07-27", "flat", 10000, ""
     ],
     [
       id.foreignRecurringService, id.organizationB, id.foreignCustomer,
       id.foreignProperty, id.foreignServiceType, id.foreignTeam, "active",
       { type: "weekly", intervalWeeks: 1 }, "08:00", 120, 19000,
-      "2026-07-27", "flat", 19000, ""
+      "2037-07-27", "flat", 19000, ""
     ]
   ];
   for (const service of recurring) {
@@ -224,7 +224,7 @@ async function fixture(role = "manager") {
 async function sync(request) {
   return request("/api/schedule-planner/sync", {
     method: "POST",
-    body: { reference: "2026-07-27" }
+    body: { reference: "2037-07-27" }
   });
 }
 
@@ -258,9 +258,9 @@ describe("schedule planner API", () => {
     assert.deepEqual(
       stored.rows.map((row) => [row.recurringServiceId, ymd(row.serviceDate)]),
       [
-        [id.biweeklyService, "2026-07-27"],
-        [id.weeklyService, "2026-07-27"],
-        [id.weeklyService, "2026-08-03"]
+        [id.biweeklyService, "2037-07-27"],
+        [id.weeklyService, "2037-07-27"],
+        [id.weeklyService, "2037-08-03"]
       ].sort((left, right) => left.join().localeCompare(right.join())).sort((left, right) =>
         left[1].localeCompare(right[1]) || left[0].localeCompare(right[0])
       )
@@ -268,21 +268,21 @@ describe("schedule planner API", () => {
     assert.ok(!stored.rows.some((row) => row.recurringServiceId === id.pausedService));
     assert.ok(!stored.rows.some((row) => row.recurringServiceId === id.foreignRecurringService));
 
-    const result = await request("/api/schedule-planner?week=A&reference=2026-07-27");
+    const result = await request("/api/schedule-planner?week=A&reference=2037-07-27");
     assert.equal(result.response.status, 200);
     const planner = result.body.data;
     assert.equal(planner.week, "A");
-    assert.equal(planner.weekStart, "2026-07-27");
-    assert.equal(planner.weekEnd, "2026-08-01");
+    assert.equal(planner.weekStart, "2037-07-27");
+    assert.equal(planner.weekEnd, "2037-08-01");
     assert.deepEqual(
       planner.days.map((day) => [day.dayName, day.date]),
       [
-        ["Monday", "2026-07-27"],
-        ["Tuesday", "2026-07-28"],
-        ["Wednesday", "2026-07-29"],
-        ["Thursday", "2026-07-30"],
-        ["Friday", "2026-07-31"],
-        ["Saturday", "2026-08-01"]
+        ["Monday", "2037-07-27"],
+        ["Tuesday", "2037-07-28"],
+        ["Wednesday", "2037-07-29"],
+        ["Thursday", "2037-07-30"],
+        ["Friday", "2037-07-31"],
+        ["Saturday", "2037-08-01"]
       ]
     );
     assert.deepEqual(
@@ -335,14 +335,14 @@ describe("schedule planner API", () => {
     await sync(request);
     const booking = await pool.query(
       `SELECT id FROM bookings
-       WHERE organization_id = $1 AND recurring_service_id = $2 AND service_date = '2026-07-27'`,
+       WHERE organization_id = $1 AND recurring_service_id = $2 AND service_date = '2037-07-27'`,
       [id.organizationA, id.weeklyService]
     );
     const bookingId = booking.rows[0].id;
 
     const moved = await request(`/api/schedule-planner/bookings/${bookingId}/move`, {
       method: "POST",
-      body: { teamId: id.teamB, date: "2026-07-28", startTime: "10:30" }
+      body: { teamId: id.teamB, date: "2037-07-28", startTime: "10:30" }
     });
     assert.equal(moved.response.status, 200, JSON.stringify(moved.body));
     assert.deepEqual(
@@ -355,7 +355,7 @@ describe("schedule planner API", () => {
       {
         id: bookingId,
         teamId: id.teamB,
-        serviceDate: "2026-07-28",
+        serviceDate: "2037-07-28",
         startTime: "10:30"
       }
     );
@@ -368,7 +368,7 @@ describe("schedule planner API", () => {
     );
     assert.deepEqual(
       route.rows.map((row) => ({ ...row, serviceDate: ymd(row.serviceDate) })),
-      [{ teamId: id.teamB, serviceDate: "2026-07-28" }]
+      [{ teamId: id.teamB, serviceDate: "2037-07-28" }]
     );
 
     const biweekly = await pool.query(
@@ -380,7 +380,7 @@ describe("schedule planner API", () => {
       `/api/schedule-planner/bookings/${biweekly.rows[0].id}/move`,
       {
         method: "POST",
-        body: { teamId: id.teamB, date: "2026-07-28", startTime: "10:30" }
+        body: { teamId: id.teamB, date: "2037-07-28", startTime: "10:30" }
       }
     );
     assert.equal(conflict.response.status, 409);
@@ -388,7 +388,7 @@ describe("schedule planner API", () => {
 
     const invalidBlock = await request(`/api/schedule-planner/bookings/${bookingId}/move`, {
       method: "POST",
-      body: { teamId: id.teamA, date: "2026-07-29", startTime: "09:00" }
+      body: { teamId: id.teamA, date: "2037-07-29", startTime: "09:00" }
     });
     assert.equal(invalidBlock.response.status, 400);
     assert.equal(invalidBlock.body.error.code, "validation_error");
@@ -399,23 +399,210 @@ describe("schedule planner API", () => {
     );
     const past = await request(`/api/schedule-planner/bookings/${bookingId}/move`, {
       method: "POST",
-      body: { teamId: id.teamA, date: "2026-07-29", startTime: "13:00" }
+      body: { teamId: id.teamA, date: "2037-07-29", startTime: "13:00" }
     });
     assert.equal(past.response.status, 409);
     assert.equal(past.body.error.code, "invalid_state");
 
     await pool.query(
-      `UPDATE bookings SET service_date = '2026-07-28', status = 'completed',
+      `UPDATE bookings SET service_date = '2037-07-28', status = 'completed',
               completed_at = now()
        WHERE id = $1`,
       [bookingId]
     );
     const completed = await request(`/api/schedule-planner/bookings/${bookingId}/move`, {
       method: "POST",
-      body: { teamId: id.teamA, date: "2026-07-29", startTime: "13:00" }
+      body: { teamId: id.teamA, date: "2037-07-29", startTime: "13:00" }
     });
     assert.equal(completed.response.status, 409);
     assert.equal(completed.body.error.code, "invalid_state");
+  });
+
+  it("creates and assigns a booking atomically when a crew block is available", async () => {
+    const { pool, id, request } = await fixture();
+    await sync(request);
+    const body = {
+      customerId: id.threeWeekCustomer,
+      propertyId: id.threeWeekProperty,
+      serviceTypeId: id.serviceType,
+      status: "confirmed",
+      scheduledStart: "2037-07-27T19:00:00.000Z",
+      expectedDurationMinutes: 150,
+      priceCents: 25000,
+      billingType: "flat",
+      billingRateCents: null,
+      specialRequests: "Atomic planner booking",
+      serviceDate: "2037-07-27",
+      startTime: "15:00",
+      teamId: id.teamA
+    };
+    const created = await request("/api/bookings", { method: "POST", body });
+    assert.equal(created.response.status, 201, JSON.stringify(created.body));
+    assert.equal(created.body.data.booking.status, "assigned");
+
+    const assigned = await pool.query(
+      `SELECT r.team_id AS "teamId", r.status AS "routeStatus"
+       FROM route_stops rs
+       JOIN routes r ON r.id = rs.route_id
+       WHERE rs.booking_id = $1`,
+      [created.body.data.booking.id]
+    );
+    assert.deepEqual(assigned.rows, [{ teamId: id.teamA, routeStatus: "draft" }]);
+
+    const conflict = await request("/api/bookings", {
+      method: "POST",
+      body: {
+        ...body,
+        specialRequests: "Must roll back",
+        teamId: id.teamB,
+        startTime: "10:30",
+        scheduledStart: "2037-07-27T14:30:00.000Z"
+      }
+    });
+    assert.equal(conflict.response.status, 409);
+    assert.equal(conflict.body.error.code, "schedule_conflict");
+    const partial = await pool.query(
+      `SELECT id FROM bookings
+       WHERE organization_id = $1 AND special_requests = 'Must roll back'`,
+      [id.organizationA]
+    );
+    assert.equal(partial.rowCount, 0);
+  });
+
+  it("moves a recurring visit and every eligible future visit in one update", async () => {
+    const { pool, id, request } = await fixture();
+    await sync(request);
+    const bookings = await pool.query(
+      `SELECT id FROM bookings
+       WHERE organization_id = $1 AND recurring_service_id = $2
+       ORDER BY recurrence_due_date`,
+      [id.organizationA, id.weeklyService]
+    );
+    const selectedId = bookings.rows[0].id;
+
+    const updated = await request(`/api/bookings/${selectedId}`, {
+      method: "PATCH",
+      body: {
+        updateScope: "future",
+        serviceDate: "2037-07-29",
+        startTime: "13:00",
+        teamId: id.teamB,
+        serviceTypeId: id.serviceType,
+        expectedDurationMinutes: 210,
+        priceCents: 27500,
+        billingType: "flat",
+        billingRateCents: null,
+        specialRequests: "Use the rear entrance"
+      }
+    });
+    assert.equal(updated.response.status, 200, JSON.stringify(updated.body));
+    assert.equal(updated.body.data.scheduleUpdate.updateScope, "future");
+    assert.equal(updated.body.data.scheduleUpdate.bookingsMoved, bookings.rowCount);
+
+    const recurring = await pool.query(
+      `SELECT starts_on AS "startsOn", recurrence_rule AS "recurrenceRule",
+              preferred_team_id AS "preferredTeamId",
+              preferred_start_time AS "preferredStartTime"
+       FROM recurring_services WHERE id = $1`,
+      [id.weeklyService]
+    );
+    assert.equal(ymd(recurring.rows[0].startsOn), "2037-07-29");
+    assert.deepEqual(recurring.rows[0].recurrenceRule, {
+      type: "weekly",
+      intervalWeeks: 1
+    });
+    assert.equal(recurring.rows[0].preferredTeamId, id.teamB);
+    assert.equal(String(recurring.rows[0].preferredStartTime).slice(0, 5), "13:00");
+
+    const moved = await pool.query(
+      `SELECT recurrence_due_date AS "dueDate", service_date AS "serviceDate",
+              expected_duration_minutes AS "duration", price_cents AS "priceCents"
+       FROM bookings
+       WHERE organization_id = $1 AND recurring_service_id = $2
+       ORDER BY recurrence_due_date`,
+      [id.organizationA, id.weeklyService]
+    );
+    assert.deepEqual(
+      moved.rows.map((booking) => ({
+        dueDate: ymd(booking.dueDate),
+        serviceDate: ymd(booking.serviceDate),
+        duration: booking.duration,
+        priceCents: booking.priceCents
+      })),
+      [
+        {
+          dueDate: "2037-07-29",
+          serviceDate: "2037-07-29",
+          duration: 210,
+          priceCents: 27500
+        },
+        {
+          dueDate: "2037-08-05",
+          serviceDate: "2037-08-05",
+          duration: 210,
+          priceCents: 27500
+        }
+      ]
+    );
+  });
+
+  it("creates, lists, and advances a service with multiple individual dates", async () => {
+    const { pool, id, request } = await fixture();
+    const created = await request("/api/recurring-services", {
+      method: "POST",
+      body: {
+        customerId: id.threeWeekCustomer,
+        propertyId: id.threeWeekProperty,
+        serviceTypeId: id.serviceType,
+        preferredTeamId: id.teamA,
+        status: "active",
+        recurrenceRule: {
+          type: "dates",
+          dates: ["2037-08-04", "2037-08-19", "2037-09-03"]
+        },
+        preferredStartTime: "10:30",
+        expectedDurationMinutes: 150,
+        priceCents: 24500,
+        billingType: "flat",
+        billingRateCents: null,
+        specialInstructions: "Individual date service",
+        startsOn: "2037-08-04"
+      }
+    });
+    assert.equal(created.response.status, 201, JSON.stringify(created.body));
+    assert.deepEqual(created.body.data.nextDates, [
+      "2037-08-04",
+      "2037-08-19",
+      "2037-09-03"
+    ]);
+    const recurringId = created.body.data.recurringService.id;
+
+    const others = await request("/api/schedule-planner/others?reference=2037-07-27");
+    const service = others.body.data.services.find((item) => item.id === recurringId);
+    assert.equal(service.nextServiceDate, "2037-08-04");
+    assert.equal(service.week, "B");
+
+    const placed = await request(`/api/schedule-planner/others/${recurringId}/place`, {
+      method: "POST",
+      body: {
+        reference: "2037-08-04",
+        week: "B",
+        teamId: id.teamA,
+        startTime: "10:30"
+      }
+    });
+    assert.equal(placed.response.status, 201, JSON.stringify(placed.body));
+    assert.equal(placed.body.data.booking.recurrenceDueDate, "2037-08-04");
+
+    const next = await request("/api/schedule-planner/others?reference=2037-08-05");
+    const advanced = next.body.data.services.find((item) => item.id === recurringId);
+    assert.equal(advanced.nextServiceDate, "2037-08-19");
+
+    const customer = await pool.query(
+      "SELECT service_frequency FROM customers WHERE id = $1",
+      [id.threeWeekCustomer]
+    );
+    assert.equal(customer.rows[0].service_frequency, "other");
   });
 
   it("cancels one visit while keeping its recurring service active", async () => {
@@ -499,8 +686,40 @@ describe("schedule planner API", () => {
     );
     assert.equal(charges.rows[0].count, 1);
 
-    const plan = await request("/api/schedule-planner?week=A&reference=2026-07-27");
+    const plan = await request("/api/schedule-planner?week=A&reference=2037-07-27");
     assert.ok(!allBookings(plan.body.data).some(item => item.id === bookingId));
+
+    const restored = await request(
+      `/api/schedule-planner/bookings/${bookingId}/restore`,
+      {
+        method: "POST",
+        body: { date: "2037-07-28", startTime: "10:30", teamId: null }
+      }
+    );
+    assert.equal(restored.response.status, 200, JSON.stringify(restored.body));
+    assert.equal(restored.body.data.booking.status, "confirmed");
+    assert.equal(restored.body.data.booking.cancellationFeeWaived, true);
+    const restoredRecords = await pool.query(
+      `SELECT b.status, b.service_date AS "serviceDate",
+              b.cancellation_reason AS "cancellationReason",
+              c.status AS charge_status
+       FROM bookings b
+       JOIN customer_charges c ON c.booking_id = b.id AND c.type = 'cancellation_fee'
+       WHERE b.id = $1`,
+      [bookingId]
+    );
+    assert.equal(restoredRecords.rows[0].status, "confirmed");
+    assert.equal(ymd(restoredRecords.rows[0].serviceDate), "2037-07-28");
+    assert.equal(restoredRecords.rows[0].cancellationReason, null);
+    assert.equal(restoredRecords.rows[0].charge_status, "waived");
+    const repeatedRestore = await request(
+      `/api/schedule-planner/bookings/${bookingId}/restore`,
+      {
+        method: "POST",
+        body: { date: "2037-07-29", startTime: "10:30", teamId: null }
+      }
+    );
+    assert.equal(repeatedRestore.response.status, 409);
 
     const biweekly = await pool.query(
       `SELECT id FROM bookings
@@ -526,7 +745,7 @@ describe("schedule planner API", () => {
         recurrence_rule, preferred_start_time, expected_duration_minutes,
         price_cents, starts_on, billing_type)
        VALUES ($1, $2, $3, $4, $5, 'active', $6, '08:00', 120, 19000,
-               '2026-07-26', 'flat')`,
+               '2037-07-26', 'flat')`,
       [
         sundayService, id.organizationA, id.weeklyCustomer,
         id.weeklyProperty, id.serviceType,
@@ -535,7 +754,7 @@ describe("schedule planner API", () => {
     );
     const result = await request("/api/schedule-planner/sync", {
       method: "POST",
-      body: { reference: "2026-07-20" }
+      body: { reference: "2037-07-20" }
     });
     assert.equal(result.response.status, 201);
     const occurrence = await pool.query(
@@ -551,14 +770,14 @@ describe("schedule planner API", () => {
         serviceDate: ymd(row.serviceDate),
         dueDate: ymd(row.dueDate)
       })),
-      [{ serviceDate: "2026-07-25", dueDate: "2026-07-26" }]
+      [{ serviceDate: "2037-07-25", dueDate: "2037-07-26" }]
     );
   });
 
   it("calculates flexible recurrence dates and places one due occurrence into its A/B week", async () => {
     const { pool, id, request } = await fixture();
 
-    const result = await request("/api/schedule-planner/others?reference=2026-07-27");
+    const result = await request("/api/schedule-planner/others?reference=2037-07-27");
     assert.equal(result.response.status, 200);
     const services = result.body.data.services;
     assert.equal(services.length, 3);
@@ -575,35 +794,35 @@ describe("schedule planner API", () => {
         customerName: "Casey Three Week",
         addressLine1: "300 Church St",
         recurrenceRule: { type: "weekly", intervalWeeks: 3 },
-        nextDueDate: "2026-08-10",
+        nextDueDate: "2037-08-10",
         week: "A"
       }
     );
-    assert.equal(byId[id.monthlyService].nextDueDate, "2026-08-15");
-    assert.equal(byId[id.monthlyService].nextServiceDate, "2026-08-14");
-    assert.equal(byId[id.nthService].nextDueDate, "2026-08-11");
+    assert.equal(byId[id.monthlyService].nextDueDate, "2037-08-15");
+    assert.equal(byId[id.monthlyService].nextServiceDate, "2037-08-14");
+    assert.equal(byId[id.nthService].nextDueDate, "2037-08-11");
 
     const dueWeek = await request(
-      "/api/schedule-planner?week=A&reference=2026-08-10"
+      "/api/schedule-planner?week=A&reference=2037-08-10"
     );
-    const monday = dueWeek.body.data.days.find((day) => day.date === "2026-08-10");
+    const monday = dueWeek.body.data.days.find((day) => day.date === "2037-08-10");
     assert.equal(monday.flexibleServices[0].id, id.threeWeekService);
     assert.equal(monday.flexibleServices[0].lastTeamName, null);
 
     const placed = await request(`/api/schedule-planner/others/${id.threeWeekService}/place`, {
       method: "POST",
       body: {
-        reference: "2026-07-27",
+        reference: "2037-07-27",
         week: "A",
         teamId: id.teamA,
         startTime: "13:00"
       }
     });
     assert.equal(placed.response.status, 201);
-    assert.equal(placed.body.data.booking.recurrenceDueDate, "2026-08-10");
-    assert.equal(placed.body.data.booking.serviceDate, "2026-08-10");
+    assert.equal(placed.body.data.booking.recurrenceDueDate, "2037-08-10");
+    assert.equal(placed.body.data.booking.serviceDate, "2037-08-10");
     assert.equal(placed.body.data.booking.teamId, id.teamA);
-    assert.equal(placed.body.data.nextDueDate, "2026-08-31");
+    assert.equal(placed.body.data.nextDueDate, "2037-08-31");
 
     const occurrences = await pool.query(
       `SELECT recurrence_due_date AS "dueDate"
@@ -613,13 +832,13 @@ describe("schedule planner API", () => {
     );
     assert.deepEqual(
       occurrences.rows.map((row) => ({ dueDate: ymd(row.dueDate) })),
-      [{ dueDate: "2026-08-10" }]
+      [{ dueDate: "2037-08-10" }]
     );
-    const advanced = await request("/api/schedule-planner/others?reference=2026-07-27");
+    const advanced = await request("/api/schedule-planner/others?reference=2037-07-27");
     assert.ok(!advanced.body.data.services.some((item) => item.id === id.threeWeekService));
-    const afterService = await request("/api/schedule-planner/others?reference=2026-08-11");
+    const afterService = await request("/api/schedule-planner/others?reference=2037-08-11");
     const service = afterService.body.data.services.find((item) => item.id === id.threeWeekService);
-    assert.equal(service.nextDueDate, "2026-08-31");
+    assert.equal(service.nextDueDate, "2037-08-31");
     assert.equal(service.lastTeamName, "Crown Crew");
   });
 
@@ -629,18 +848,18 @@ describe("schedule planner API", () => {
     const updated = await request(`/api/recurring-services/${id.threeWeekService}`, {
       method: "PATCH",
       body: {
-        startsOn: "2026-07-30",
+        startsOn: "2037-07-30",
         recurrenceRule: { type: "weekly", intervalWeeks: 3 }
       }
     });
     assert.equal(updated.response.status, 200);
-    assert.equal(updated.body.data.nextDates[0], "2026-07-30");
+    assert.equal(updated.body.data.nextDates[0], "2037-07-30");
 
-    const others = await request("/api/schedule-planner/others?reference=2026-07-27");
+    const others = await request("/api/schedule-planner/others?reference=2037-07-27");
     assert.equal(others.response.status, 200);
     const service = others.body.data.services.find((item) => item.id === id.threeWeekService);
-    assert.equal(service.nextDueDate, "2026-07-30");
-    assert.equal(service.nextServiceDate, "2026-07-30");
+    assert.equal(service.nextDueDate, "2037-07-30");
+    assert.equal(service.nextServiceDate, "2037-07-30");
   });
 
   it("returns past services with the servicing team and employee names", async () => {
@@ -694,7 +913,7 @@ describe("schedule planner API", () => {
   it("requires a manager and isolates every schedule operation by organization", async () => {
     const cleaner = await fixture("cleaner");
     const denied = await cleaner.request(
-      "/api/schedule-planner?week=A&reference=2026-07-27"
+      "/api/schedule-planner?week=A&reference=2037-07-27"
     );
     assert.equal(denied.response.status, 403);
     assert.equal(denied.body.error.code, "forbidden");
@@ -703,15 +922,23 @@ describe("schedule planner API", () => {
       { method: "POST", body: {} }
     );
     assert.equal(cancelDenied.response.status, 403);
+    const restoreDenied = await cleaner.request(
+      `/api/schedule-planner/bookings/${crypto.randomUUID()}/restore`,
+      {
+        method: "POST",
+        body: { date: "2037-07-28", startTime: "08:00", teamId: null }
+      }
+    );
+    assert.equal(restoreDenied.response.status, 403);
 
     const { pool, id, request } = await fixture();
     await sync(request);
-    const planner = await request("/api/schedule-planner?week=A&reference=2026-07-27");
+    const planner = await request("/api/schedule-planner?week=A&reference=2037-07-27");
     assert.ok(!planner.body.data.teams.some((team) => team.id === id.foreignTeam));
     assert.ok(!allBookings(planner.body.data).some((booking) =>
       booking.customerName === "Foreign Customer"
     ));
-    const others = await request("/api/schedule-planner/others?reference=2026-07-27");
+    const others = await request("/api/schedule-planner/others?reference=2037-07-27");
     assert.ok(!others.body.data.services.some((service) =>
       service.id === id.foreignRecurringService
     ));
@@ -722,8 +949,8 @@ describe("schedule planner API", () => {
        (id, organization_id, customer_id, property_id, service_type_id, status,
         scheduled_start, service_date, expected_duration_minutes, price_cents)
        VALUES
-       ($1, $2, $3, $4, $5, 'confirmed', '2026-07-27T12:00:00Z',
-        '2026-07-27', 120, 19000)`,
+       ($1, $2, $3, $4, $5, 'confirmed', '2037-07-27T12:00:00Z',
+        '2037-07-27', 120, 19000)`,
       [
         foreignBooking.booking, id.organizationB, id.foreignCustomer,
         id.foreignProperty, id.foreignServiceType
@@ -733,7 +960,7 @@ describe("schedule planner API", () => {
       `/api/schedule-planner/bookings/${foreignBooking.booking}/move`,
       {
         method: "POST",
-        body: { teamId: id.teamA, date: "2026-07-28", startTime: "08:00" }
+        body: { teamId: id.teamA, date: "2037-07-28", startTime: "08:00" }
       }
     );
     assert.equal(hidden.response.status, 404);
@@ -743,5 +970,13 @@ describe("schedule planner API", () => {
       { method: "POST", body: {} }
     );
     assert.equal(cancelHidden.response.status, 404);
+    const restoreHidden = await request(
+      `/api/schedule-planner/bookings/${foreignBooking.booking}/restore`,
+      {
+        method: "POST",
+        body: { date: "2037-07-28", startTime: "08:00", teamId: null }
+      }
+    );
+    assert.equal(restoreHidden.response.status, 404);
   });
 });

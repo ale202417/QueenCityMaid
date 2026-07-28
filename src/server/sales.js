@@ -4,6 +4,11 @@ import { z } from "zod";
 import { recordAudit } from "./auth.js";
 import { recurrenceDates, responseDueAt } from "./domain.js";
 import { HttpError, asyncRoute, data, validate } from "./http.js";
+import {
+  detachBooking,
+  moveBookingInTransaction,
+  validateSchedulePlacement
+} from "./schedule-planner.js";
 
 const uuid = z.string().uuid();
 const dateOnly = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).refine(value => {
@@ -29,6 +34,13 @@ const bookingStatuses = [
 ];
 
 const recurrenceRule = z.discriminatedUnion("type", [
+  z.object({
+    type: z.literal("dates"),
+    dates: z.array(dateOnly).min(1).max(200).refine(
+      values => new Set(values).size === values.length,
+      "Individual dates cannot contain duplicates"
+    )
+  }).strict(),
   z.object({
     type: z.literal("weekly"),
     intervalWeeks: z.union([z.literal(1), z.literal(2), z.literal(3)])
@@ -69,7 +81,8 @@ const leadUpdate = z.object({
   firstRespondedAt: instant.nullable().optional(),
   followUpDueAt: instant.nullable().optional(),
   followUpCompletedAt: instant.nullable().optional(),
-  closedReason: z.string().trim().min(1).max(1000).nullable().optional()
+  closedReason: z.string().trim().min(1).max(1000).nullable().optional(),
+  expectedUpdatedAt: instant.optional()
 }).strict().refine(value => Object.keys(value).length > 0, {
   message: "At least one field is required"
 }).refine(value => !value.status || !closedLeadStatuses.has(value.status) || value.closedReason, {
@@ -81,6 +94,30 @@ const activityCreate = z.object({
   type: z.enum(["note", "call", "text", "email", "status_change", "follow_up"]),
   body: z.string().trim().min(1).max(5000),
   occurredAt: instant.optional()
+}).strict();
+
+const leadClose = z.object({
+  status: z.enum(["declined", "unresponsive", "duplicate", "not_serviceable"]),
+  reason: z.string().trim().min(1).max(1000)
+}).strict();
+
+const leadConvert = z.object({
+  customerType: z.enum(["residential", "commercial", "realtor"]).default("residential"),
+  serviceFrequency: z.enum(["weekly", "biweekly", "monthly", "other"]).nullable().optional(),
+  paymentMethod: z.enum(["zelle", "venmo", "paypal", "cash", "check", "other"]).nullable().optional(),
+  internalNotes: z.string().trim().max(5000).optional(),
+  property: z.object({
+    label: z.string().trim().min(1).max(100).optional(),
+    addressLine1: z.string().trim().min(1).max(200),
+    addressLine2: z.string().trim().max(200).optional(),
+    city: z.string().trim().min(1).max(100),
+    state: z.string().trim().length(2).default("NC"),
+    postalCode: z.string().trim().min(3).max(20),
+    squareFeet: z.number().int().positive().nullable().optional(),
+    condition: z.string().trim().max(100).nullable().optional(),
+    pets: z.string().trim().max(1000).optional(),
+    serviceNotes: z.string().trim().max(5000).optional()
+  }).strict().nullable().optional()
 }).strict();
 
 const quoteItemInput = z.object({
@@ -153,6 +190,7 @@ const recurringUpdate = recurringBase.partial().extend({
 }).superRefine(validateBilling);
 
 function customerFrequencyForRule(rule) {
+  if (rule.type === "dates") return "other";
   if (rule.type === "weekly") {
     if (rule.intervalWeeks === 1) return "weekly";
     if (rule.intervalWeeks === 2) return "biweekly";
@@ -183,9 +221,16 @@ const bookingFields = z.object({
   previousBookingId: uuid.nullable().optional()
 }).strict();
 
-const bookingCreate = bookingFields.superRefine(validateBooking);
+const bookingCreate = bookingFields.extend({
+  serviceDate: dateOnly.optional(),
+  startTime: time.optional(),
+  teamId: uuid.nullable().optional()
+}).strict().superRefine(validateBooking);
 const bookingUpdate = bookingFields.partial().extend({
-  updateScope: z.enum(["single", "future"]).optional()
+  updateScope: z.enum(["single", "future"]).optional(),
+  serviceDate: dateOnly.optional(),
+  startTime: time.optional(),
+  teamId: uuid.nullable().optional()
 }).strict().refine(value => Object.keys(value).some(key => key !== "updateScope"), {
   message: "At least one field is required"
 }).superRefine(validateBooking);
@@ -344,12 +389,25 @@ async function insertQuoteItem(client, organizationId, quoteId, item) {
 }
 
 async function quoteWithDetails(client, id, organizationId) {
-  const quote = await owned(client, "quotes", id, organizationId, "Quote");
+  await owned(client, "quotes", id, organizationId, "Quote");
+  const quote = await client.query(
+    `SELECT q.*, c.name AS customer_name, p.address_line1, p.city, p.postal_code
+     FROM quotes q
+     JOIN customers c
+       ON c.id = q.customer_id AND c.organization_id = q.organization_id
+     JOIN properties p
+       ON p.id = q.property_id AND p.organization_id = q.organization_id
+     WHERE q.id = $1 AND q.organization_id = $2`,
+    [id, organizationId]
+  );
   const [items, approvals] = await Promise.all([
     client.query(
-      `SELECT * FROM quote_items
-       WHERE quote_id = $1 AND organization_id = $2
-       ORDER BY sort_order, id`,
+      `SELECT qi.*, st.name AS service_name
+       FROM quote_items qi
+       LEFT JOIN service_types st
+         ON st.id = qi.service_type_id AND st.organization_id = qi.organization_id
+       WHERE qi.quote_id = $1 AND qi.organization_id = $2
+       ORDER BY qi.sort_order, qi.id`,
       [id, organizationId]
     ),
     client.query(
@@ -360,7 +418,7 @@ async function quoteWithDetails(client, id, organizationId) {
     )
   ]);
   return {
-    quote: apiRow(quote),
+    quote: apiRow(quote.rows[0]),
     items: items.rows.map(apiRow),
     approvals: approvals.rows.map(apiRow)
   };
@@ -420,31 +478,35 @@ function leadRoutes(router, pool) {
       ownerUserId: uuid.optional()
     }).strict(), req.query);
     const params = [req.auth.organizationId];
-    const where = ["organization_id = $1"];
+    const where = ["l.organization_id = $1"];
     if (input.status) {
       params.push(input.status);
-      where.push(`status = $${params.length}`);
+      where.push(`l.status = $${params.length}`);
     }
     if (input.ownerUserId) {
       params.push(input.ownerUserId);
-      where.push(`owner_user_id = $${params.length}`);
+      where.push(`l.owner_user_id = $${params.length}`);
     }
     if (input.q) {
       params.push(`${input.q.toLowerCase()}%`);
       where.push(`(
-        LOWER(name) LIKE $${params.length}
-        OR LOWER(email) LIKE $${params.length}
-        OR LOWER(phone) LIKE $${params.length}
+        LOWER(l.name) LIKE $${params.length}
+        OR LOWER(l.email) LIKE $${params.length}
+        OR LOWER(l.phone) LIKE $${params.length}
       )`);
     }
     const count = await pool.query(
-      `SELECT COUNT(*)::integer AS total FROM leads WHERE ${where.join(" AND ")}`,
+      `SELECT COUNT(*)::integer AS total FROM leads l WHERE ${where.join(" AND ")}`,
       params
     );
     const listParams = [...params, input.limit, input.offset];
     const result = await pool.query(
-      `SELECT * FROM leads WHERE ${where.join(" AND ")}
-       ORDER BY received_at DESC
+      `SELECT l.*, u.name AS owner_name
+       FROM leads l
+       JOIN users u
+         ON u.id = l.owner_user_id AND u.organization_id = l.organization_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY l.received_at DESC
        LIMIT $${listParams.length - 1} OFFSET $${listParams.length}`,
       listParams
     );
@@ -513,8 +575,24 @@ function leadRoutes(router, pool) {
   router.patch("/leads/:id", asyncRoute(async (req, res) => {
     const id = idParam(req);
     const input = validate(leadUpdate, req.body);
+    if (input.status === "converted" || closedLeadStatuses.has(input.status)) {
+      throw new HttpError(
+        409,
+        "lifecycle_action_required",
+        "Use the lead Convert or Close action for this status"
+      );
+    }
     const lead = await transaction(pool, async client => {
       const before = await owned(client, "leads", id, req.auth.organizationId, "Lead");
+      if (input.expectedUpdatedAt
+        && new Date(input.expectedUpdatedAt).getTime() !== new Date(before.updated_at).getTime()) {
+        throw new HttpError(
+          409,
+          "stale_record",
+          "This lead changed after it was opened. Refresh and review the latest information."
+        );
+      }
+      delete input.expectedUpdatedAt;
       if (input.ownerUserId) await requireManager(client, input.ownerUserId, req.auth.organizationId);
       if (input.customerId !== undefined) {
         await optionalOwned(client, "customers", input.customerId, req.auth.organizationId, "Customer");
@@ -550,6 +628,194 @@ function leadRoutes(router, pool) {
       return result.rows[0];
     });
     data(res, { lead: apiRow(lead) });
+  }));
+
+  router.post("/leads/:id/close", asyncRoute(async (req, res) => {
+    const id = idParam(req);
+    const input = validate(leadClose, req.body);
+    const lead = await transaction(pool, async (client) => {
+      const before = await owned(client, "leads", id, req.auth.organizationId, "Lead");
+      if (before.status === "converted" || closedLeadStatuses.has(before.status)) {
+        throw new HttpError(409, "invalid_state", "This lead cannot be closed again");
+      }
+      const result = await client.query(
+        `UPDATE leads
+         SET status = $3, closed_reason = $4, updated_at = now()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [id, req.auth.organizationId, input.status, input.reason]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "lead",
+        entityId: id,
+        action: "close",
+        before: apiRow(before),
+        after: apiRow(result.rows[0]),
+        reason: input.reason
+      });
+      return result.rows[0];
+    });
+    data(res, { lead: apiRow(lead) });
+  }));
+
+  router.post("/leads/:id/reopen", asyncRoute(async (req, res) => {
+    const id = idParam(req);
+    validate(z.object({}).strict(), req.body);
+    const lead = await transaction(pool, async (client) => {
+      const before = await owned(client, "leads", id, req.auth.organizationId, "Lead");
+      if (!closedLeadStatuses.has(before.status)) {
+        throw new HttpError(409, "invalid_state", "Only a closed lead can be reopened");
+      }
+      const result = await client.query(
+        `UPDATE leads
+         SET status = CASE WHEN first_responded_at IS NULL THEN 'new' ELSE 'contacted' END,
+             closed_reason = NULL, follow_up_completed_at = NULL, updated_at = now()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [id, req.auth.organizationId]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "lead",
+        entityId: id,
+        action: "reopen",
+        before: apiRow(before),
+        after: apiRow(result.rows[0])
+      });
+      return result.rows[0];
+    });
+    data(res, { lead: apiRow(lead) });
+  }));
+
+  router.post("/leads/:id/convert", asyncRoute(async (req, res) => {
+    const id = idParam(req);
+    const input = validate(leadConvert, req.body);
+    const converted = await transaction(pool, async (client) => {
+      const lead = await owned(client, "leads", id, req.auth.organizationId, "Lead");
+      if (lead.status === "converted") {
+        throw new HttpError(409, "invalid_state", "This lead is already converted");
+      }
+      if (closedLeadStatuses.has(lead.status)) {
+        throw new HttpError(409, "invalid_state", "Reopen this lead before converting it");
+      }
+
+      let customer;
+      if (lead.customer_id) {
+        customer = await owned(
+          client, "customers", lead.customer_id, req.auth.organizationId, "Customer"
+        );
+      } else {
+        const matching = await client.query(
+          `SELECT * FROM customers
+           WHERE organization_id = $1
+             AND (
+               ($2::text IS NOT NULL AND phone = $2)
+               OR ($3::text IS NOT NULL AND lower(email) = lower($3))
+             )
+           ORDER BY created_at
+           LIMIT 2`,
+          [req.auth.organizationId, lead.phone, lead.email]
+        );
+        if (matching.rowCount > 1) {
+          throw new HttpError(
+            409, "customer_match_ambiguous", "More than one customer matches this lead"
+          );
+        }
+        if (matching.rowCount) {
+          customer = matching.rows[0];
+        } else {
+          if (!lead.phone) {
+            throw new HttpError(
+              409,
+              "customer_phone_required",
+              "Add a phone number to this lead before converting it"
+            );
+          }
+          const customerId = crypto.randomUUID();
+          const created = await client.query(
+            `INSERT INTO customers
+             (id, organization_id, type, name, email, phone, preferred_channel,
+              service_frequency, payment_method, status, internal_notes)
+             VALUES ($1, $2, $3, $4, $5, $6, 'text', $7, $8, 'active', $9)
+             RETURNING *`,
+            [
+              customerId, req.auth.organizationId, input.customerType, lead.name,
+              lead.email, lead.phone, input.serviceFrequency ?? null,
+              input.paymentMethod ?? null, input.internalNotes || ""
+            ]
+          );
+          customer = created.rows[0];
+          await recordAudit(client, req.auth, {
+            entityType: "customer",
+            entityId: customerId,
+            action: "create_from_lead",
+            after: apiRow(customer)
+          });
+        }
+      }
+
+      let property = null;
+      if (input.property) {
+        const existing = await client.query(
+          `SELECT * FROM properties
+           WHERE organization_id = $1 AND customer_id = $2
+             AND lower(address_line1) = lower($3) AND postal_code = $4
+           LIMIT 1`,
+          [
+            req.auth.organizationId, customer.id,
+            input.property.addressLine1, input.property.postalCode
+          ]
+        );
+        if (existing.rowCount) {
+          property = existing.rows[0];
+        } else {
+          const propertyId = crypto.randomUUID();
+          const created = await client.query(
+            `INSERT INTO properties
+             (id, organization_id, customer_id, label, address_line1, address_line2,
+              city, state, postal_code, square_feet, condition, pets, service_notes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             RETURNING *`,
+            [
+              propertyId, req.auth.organizationId, customer.id,
+              input.property.label || "", input.property.addressLine1,
+              input.property.addressLine2 || "", input.property.city,
+              input.property.state, input.property.postalCode,
+              input.property.squareFeet ?? null, input.property.condition ?? null,
+              input.property.pets || "", input.property.serviceNotes || ""
+            ]
+          );
+          property = created.rows[0];
+          await recordAudit(client, req.auth, {
+            entityType: "property",
+            entityId: propertyId,
+            action: "create_from_lead",
+            after: apiRow(property)
+          });
+        }
+      }
+
+      const updatedLead = await client.query(
+        `UPDATE leads
+         SET customer_id = $3, status = 'converted', closed_reason = NULL,
+             updated_at = now()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [id, req.auth.organizationId, customer.id]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "lead",
+        entityId: id,
+        action: "convert",
+        before: apiRow(lead),
+        after: apiRow(updatedLead.rows[0])
+      });
+      return {
+        lead: apiRow(updatedLead.rows[0]),
+        customer: apiRow(customer),
+        property: property ? apiRow(property) : null
+      };
+    });
+    data(res, converted);
   }));
 
   router.post("/leads/:id/activities", asyncRoute(async (req, res) => {
@@ -603,19 +869,26 @@ function quoteRoutes(router, pool) {
       customerId: uuid.optional()
     }).strict(), req.query);
     const params = [req.auth.organizationId];
-    const where = ["organization_id = $1"];
+    const where = ["q.organization_id = $1"];
     if (input.status) {
       params.push(input.status);
-      where.push(`status = $${params.length}`);
+      where.push(`q.status = $${params.length}`);
     }
     if (input.customerId) {
       params.push(input.customerId);
-      where.push(`customer_id = $${params.length}`);
+      where.push(`q.customer_id = $${params.length}`);
     }
     params.push(input.limit, input.offset);
     const result = await pool.query(
-      `SELECT * FROM quotes WHERE ${where.join(" AND ")}
-       ORDER BY created_at DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      `SELECT q.*, c.name AS customer_name, p.address_line1, p.city, p.postal_code
+       FROM quotes q
+       JOIN customers c
+         ON c.id = q.customer_id AND c.organization_id = q.organization_id
+       JOIN properties p
+         ON p.id = q.property_id AND p.organization_id = q.organization_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY q.created_at DESC
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
       params
     );
     data(res, { quotes: result.rows.map(apiRow) });
@@ -859,22 +1132,47 @@ function recurringRoutes(router, pool) {
       customerId: uuid.optional()
     }).strict(), req.query);
     const params = [req.auth.organizationId];
-    const where = ["organization_id = $1"];
+    const where = ["rs.organization_id = $1"];
     if (input.status) {
       params.push(input.status);
-      where.push(`status = $${params.length}`);
+      where.push(`rs.status = $${params.length}`);
     }
     if (input.customerId) {
       params.push(input.customerId);
-      where.push(`customer_id = $${params.length}`);
+      where.push(`rs.customer_id = $${params.length}`);
     }
-    params.push(input.limit, input.offset);
-    const result = await pool.query(
-      `SELECT * FROM recurring_services WHERE ${where.join(" AND ")}
-       ORDER BY starts_on, created_at LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    const count = await pool.query(
+      `SELECT COUNT(*)::integer AS total
+       FROM recurring_services rs
+       WHERE ${where.join(" AND ")}`,
       params
     );
-    data(res, { recurringServices: result.rows.map(apiRow) });
+    params.push(input.limit, input.offset);
+    const result = await pool.query(
+      `SELECT rs.*, c.name AS customer_name, p.address_line1, p.city,
+              p.postal_code, st.name AS service_name, t.name AS preferred_team_name
+       FROM recurring_services rs
+       JOIN customers c
+         ON c.id = rs.customer_id AND c.organization_id = rs.organization_id
+       JOIN properties p
+         ON p.id = rs.property_id AND p.organization_id = rs.organization_id
+       JOIN service_types st
+         ON st.id = rs.service_type_id AND st.organization_id = rs.organization_id
+       LEFT JOIN teams t
+         ON t.id = rs.preferred_team_id AND t.organization_id = rs.organization_id
+       WHERE ${where.join(" AND ")}
+       ORDER BY c.name, rs.starts_on, rs.created_at
+       LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    );
+    data(res, {
+      recurringServices: result.rows.map(apiRow),
+      pagination: {
+        total: Number(count.rows[0].total),
+        limit: input.limit,
+        offset: input.offset
+      }
+    });
   }));
 
   router.post("/recurring-services", asyncRoute(async (req, res) => {
@@ -938,6 +1236,70 @@ function recurringRoutes(router, pool) {
       const before = await owned(
         client, "recurring_services", id, req.auth.organizationId, "Recurring service"
       );
+      if (input.status === "active" && before.status !== "active") {
+        if (before.status !== "paused") {
+          throw new HttpError(409, "invalid_state", "Only a paused service plan can be resumed");
+        }
+        const customer = await owned(
+          client, "customers", before.customer_id, req.auth.organizationId, "Customer"
+        );
+        if (customer.status !== "active") {
+          throw new HttpError(409, "customer_inactive", "Resume the customer before restarting a service plan");
+        }
+        const restartOn = input.restartOn || input.startsOn;
+        if (!restartOn) {
+          throw new HttpError(400, "restart_date_required", "A restart date is required");
+        }
+        input.startsOn = restartOn;
+        input.restartOn = restartOn;
+        await client.query(
+          `UPDATE bookings
+           SET recurrence_due_date = NULL, updated_at = now()
+           WHERE organization_id = $1 AND recurring_service_id = $2
+             AND status = 'cancelled'
+             AND cancellation_reason IN ('Recurring service paused', 'Customer service paused')
+             AND COALESCE(service_date, CAST(scheduled_start AS date)) >= $3`,
+          [req.auth.organizationId, id, restartOn]
+        );
+      }
+      if (["paused", "ended"].includes(input.status)
+        && before.status !== input.status) {
+        const future = await client.query(
+          `SELECT id FROM bookings
+           WHERE organization_id = $1 AND recurring_service_id = $2
+             AND scheduled_start >= now()
+             AND status IN ('requested', 'confirmed', 'assigned')`,
+          [req.auth.organizationId, id]
+        );
+        for (const booking of future.rows) {
+          await detachBooking(client, req.auth.organizationId, booking.id);
+        }
+        await client.query(
+          `UPDATE notifications SET status = 'cancelled'
+           WHERE organization_id = $1 AND status = 'queued'
+             AND booking_id IN (
+               SELECT id FROM bookings
+               WHERE organization_id = $1 AND recurring_service_id = $2
+                 AND scheduled_start >= now()
+                 AND status IN ('requested', 'confirmed', 'assigned')
+             )`,
+          [req.auth.organizationId, id]
+        );
+        await client.query(
+          `UPDATE bookings
+           SET status = 'cancelled', cancellation_reason = $3, updated_at = now()
+           WHERE organization_id = $1 AND recurring_service_id = $2
+             AND scheduled_start >= now()
+             AND status IN ('requested', 'confirmed', 'assigned')`,
+          [
+            req.auth.organizationId,
+            id,
+            input.status === "paused"
+              ? "Recurring service paused"
+              : "Recurring service ended"
+          ]
+        );
+      }
       const merged = {
         customerId: input.customerId || before.customer_id,
         propertyId: input.propertyId || before.property_id,
@@ -991,7 +1353,15 @@ function recurringRoutes(router, pool) {
         ]
       );
       await recordAudit(client, req.auth, {
-        entityType: "recurringService", entityId: id, action: "update",
+        entityType: "recurringService",
+        entityId: id,
+        action: input.status === "paused"
+          ? "pause"
+          : input.status === "active"
+            ? "resume"
+            : input.status === "ended"
+              ? "end"
+              : "update",
         before: apiRow(before), after: apiRow(result.rows[0])
       });
       return result.rows[0];
@@ -1041,6 +1411,15 @@ function bookingRoutes(router, pool) {
     const input = validate(bookingCreate, req.body);
     const booking = await transaction(pool, async client => {
       await requireSalesReferences(client, req.auth.organizationId, input);
+      if (input.teamId && input.serviceDate && input.startTime) {
+        await validateSchedulePlacement({
+          client,
+          organizationId: req.auth.organizationId,
+          teamId: input.teamId,
+          serviceDate: input.serviceDate,
+          startTime: input.startTime
+        });
+      }
       const result = await client.query(
         `INSERT INTO bookings
          (id, organization_id, customer_id, property_id, service_type_id, quote_id,
@@ -1071,7 +1450,22 @@ function bookingRoutes(router, pool) {
         entityType: "booking", entityId: result.rows[0].id, action: "create",
         after: apiRow(result.rows[0])
       });
-      return result.rows[0];
+      if (input.serviceDate || input.startTime || input.teamId !== undefined) {
+        await moveBookingInTransaction({
+          client,
+          auth: req.auth,
+          bookingId: result.rows[0].id,
+          date: input.serviceDate,
+          startTime: input.startTime,
+          teamId: input.teamId,
+          updateScope: "single"
+        });
+      }
+      const final = await client.query(
+        "SELECT * FROM bookings WHERE id = $1 AND organization_id = $2",
+        [result.rows[0].id, req.auth.organizationId]
+      );
+      return final.rows[0];
     });
     data(res, { booking: apiRow(booking) }, 201);
   }));
@@ -1091,7 +1485,8 @@ function bookingRoutes(router, pool) {
       const updateScope = input.updateScope || "single";
       const futureDetailKeys = new Set([
         "updateScope", "serviceTypeId", "expectedDurationMinutes", "priceCents",
-        "billingType", "billingRateCents", "specialRequests"
+        "billingType", "billingRateCents", "specialRequests", "serviceDate",
+        "startTime", "teamId"
       ]);
       if (updateScope === "future"
         && Object.keys(input).some(key => !futureDetailKeys.has(key))) {
@@ -1158,7 +1553,8 @@ function bookingRoutes(router, pool) {
         cancellationWaiverReason: "cancellation_waiver_reason",
         previousBookingId: "previous_booking_id"
       };
-      const entries = Object.entries(input).filter(([key]) => key !== "updateScope");
+      const scheduleKeys = new Set(["updateScope", "serviceDate", "startTime", "teamId"]);
+      const entries = Object.entries(input).filter(([key]) => !scheduleKeys.has(key));
       const values = entries.map(([, value]) => value);
       const sets = entries.map(([key], index) => `${columns[key]} = $${index + 1}`);
       if (input.scheduledStart) {
@@ -1245,11 +1641,32 @@ function bookingRoutes(router, pool) {
           }
         });
       }
-      return { booking: result.rows[0], futureBookingsUpdated };
+      let scheduleUpdate = null;
+      if (input.serviceDate || input.startTime || input.teamId !== undefined) {
+        scheduleUpdate = await moveBookingInTransaction({
+          client,
+          auth: req.auth,
+          bookingId: id,
+          date: input.serviceDate,
+          startTime: input.startTime,
+          teamId: input.teamId,
+          updateScope
+        });
+      }
+      const final = await client.query(
+        "SELECT * FROM bookings WHERE id = $1 AND organization_id = $2",
+        [id, req.auth.organizationId]
+      );
+      return {
+        booking: final.rows[0],
+        futureBookingsUpdated,
+        scheduleUpdate
+      };
     });
     data(res, {
       booking: apiRow(updated.booking),
-      futureBookingsUpdated: updated.futureBookingsUpdated
+      futureBookingsUpdated: updated.futureBookingsUpdated,
+      scheduleUpdate: updated.scheduleUpdate
     });
   }));
 }

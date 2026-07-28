@@ -14,7 +14,13 @@ export function data(res, value, status = 200) {
 export function validate(schema, value) {
   const result = schema.safeParse(value);
   if (!result.success) {
-    throw new HttpError(400, "validation_error", "Invalid request", result.error.flatten());
+    throw new HttpError(400, "validation_error", "Invalid request", {
+      ...result.error.flatten(),
+      issues: result.error.issues.map((issue) => ({
+        path: issue.path,
+        message: issue.message
+      }))
+    });
   }
   return result.data;
 }

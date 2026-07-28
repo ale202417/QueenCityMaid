@@ -217,6 +217,22 @@ describe("dispatch and service day", () => {
     });
     assert.equal(created.response.status, 201);
     const issueId = created.body.data.issue.id;
+    const open = await request("/api/job-issues?status=open");
+    assert.equal(open.response.status, 200);
+    assert.deepEqual(
+      open.body.data.jobIssues.map((issue) => ({
+        id: issue.id,
+        customerName: issue.customerName,
+        type: issue.type,
+        resolvedAt: issue.resolvedAt
+      })),
+      [{
+        id: issueId,
+        customerName: "Jordan Ellis",
+        type: "extra_work",
+        resolvedAt: null
+      }]
+    );
     const invalid = await request(`/api/job-issues/${issueId}`, {
       method: "PATCH",
       body: JSON.stringify({
@@ -236,10 +252,20 @@ describe("dispatch and service day", () => {
       })
     });
     assert.equal(resolved.response.status, 200);
+    const resolvedList = await request("/api/job-issues?status=resolved");
+    assert.equal(resolvedList.body.data.jobIssues[0].id, issueId);
+    assert.ok(resolvedList.body.data.jobIssues[0].resolvedAt);
     const charge = await pool.query(
       "SELECT type, amount_cents FROM customer_charges WHERE booking_id = $1",
       [ids.booking]
     );
     assert.deepEqual(charge.rows, [{ type: "additional_work", amount_cents: 5000 }]);
+  });
+
+  it("does not expose the manager issue queue to cleaners", async () => {
+    const { request } = await fixture("cleaner");
+    const response = await request("/api/job-issues?status=all");
+    assert.equal(response.response.status, 403);
+    assert.equal(response.body.error.code, "forbidden");
   });
 });

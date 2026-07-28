@@ -32,6 +32,7 @@ function publicUser(row) {
     name: row.name,
     role: row.role,
     active: row.active,
+    mustChangePassword: Boolean(row.mustChangePassword),
     employeeId: row.employeeId || null,
     createdAt: row.createdAt
   };
@@ -43,7 +44,9 @@ export function createAccountRouter({ pool }) {
 
   router.get("/users", asyncRoute(async (req, res) => {
     const result = await pool.query(
-      `SELECT u.id, u.email, u.name, u.role, u.active, u.created_at AS "createdAt",
+      `SELECT u.id, u.email, u.name, u.role, u.active,
+              u.must_change_password AS "mustChangePassword",
+              u.created_at AS "createdAt",
               e.id AS "employeeId"
        FROM users u
        LEFT JOIN employees e ON e.user_id = u.id AND e.organization_id = u.organization_id
@@ -56,6 +59,7 @@ export function createAccountRouter({ pool }) {
 
   router.post("/users", asyncRoute(async (req, res) => {
     const input = validate(createSchema, req.body);
+    const email = input.email.toLowerCase();
     const id = crypto.randomUUID();
     const passwordHash = await hashPassword(input.password);
     const user = await withTransaction(pool, async (client) => {
@@ -73,9 +77,9 @@ export function createAccountRouter({ pool }) {
       try {
         await client.query(
           `INSERT INTO users
-           (id, organization_id, email, name, role, password_hash)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [id, req.auth.organizationId, input.email, input.name, input.role, passwordHash]
+           (id, organization_id, email, name, role, password_hash, must_change_password)
+           VALUES ($1, $2, $3, $4, $5, $6, true)`,
+          [id, req.auth.organizationId, email, input.name, input.role, passwordHash]
         );
       } catch (error) {
         if (error.code === "23505") {
@@ -91,10 +95,11 @@ export function createAccountRouter({ pool }) {
       }
       const result = {
         id,
-        email: input.email,
+        email,
         name: input.name,
         role: input.role,
         active: true,
+        mustChangePassword: true,
         employeeId: input.employeeId || null,
         createdAt: new Date()
       };
@@ -143,7 +148,8 @@ export function createAccountRouter({ pool }) {
     const passwordHash = await hashPassword(input.password);
     await withTransaction(pool, async (client) => {
       const result = await client.query(
-        `UPDATE users SET password_hash = $3, updated_at = now()
+        `UPDATE users
+         SET password_hash = $3, must_change_password = true, updated_at = now()
          WHERE id = $1 AND organization_id = $2
          RETURNING id`,
         [id, req.auth.organizationId, passwordHash]

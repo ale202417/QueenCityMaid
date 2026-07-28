@@ -20,12 +20,17 @@ restricted to `req.auth.organizationId`.
 | `POST` | `/leads` | Intake a lead and calculate its response deadline |
 | `GET` | `/leads/:id` | Get a lead and its activity history |
 | `PATCH` | `/leads/:id` | Update ownership, contact details, status, or follow-up fields |
+| `POST` | `/leads/:id/close` | Close the lead with an outcome and reason |
+| `POST` | `/leads/:id/reopen` | Return a closed lead to active follow-up |
+| `POST` | `/leads/:id/convert` | Atomically create an active customer and optional first property |
 | `POST` | `/leads/:id/activities` | Record a note, call, text, email, status change, or follow-up |
 
 Lead intake accepts `source`, `name`, one of `phone`/`email`, and optional
 `ownerUserId`, `customerId`, `message`, and ISO `receivedAt`. Calls, texts, and
 emails automatically record the first response and move a new lead to
-`contacted`. A follow-up activity records completion.
+`contacted`. A follow-up activity records completion. Updates may include
+`expectedUpdatedAt`; a stale timestamp is rejected instead of overwriting a
+newer manager change.
 
 ## Quotes
 
@@ -76,6 +81,7 @@ Supported recurrence rules:
 { "type": "weekly", "intervalWeeks": 3 }
 { "type": "monthly", "dayOfMonth": 15 }
 { "type": "nth_weekday", "weekday": 1, "occurrence": 2 }
+{ "type": "individual_dates", "dates": ["2026-08-03", "2026-08-17"] }
 ```
 
 `weekday` uses `0` for Sunday through `6` for Saturday.
@@ -103,8 +109,9 @@ bookings require a rate.
 
 Booking updates may include `updateScope`. The default `single` updates only
 the selected booking. `future` requires a recurring booking and applies its
-service type, duration, pricing, billing, and instructions to the recurring
-plan plus requested, confirmed, or assigned visits from that date forward.
+service date, service type, duration, pricing, billing, and instructions to the
+recurring plan plus requested, confirmed, or assigned visits from that date
+forward.
 Started, completed, cancelled, rescheduled, and unable-to-complete bookings
 remain unchanged.
 

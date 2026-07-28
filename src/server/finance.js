@@ -63,6 +63,9 @@ const paymentDecisionSchema = z.object({
   hourlyMinutes: z.number().int().positive().max(1440).optional(),
   paymentMethod: z.enum(["zelle", "venmo", "paypal", "cash", "check"]).optional()
 }).strict();
+const correctionReasonSchema = z.object({
+  reason: text(1000)
+}).strict();
 const emptySchema = z.object({}).strict();
 
 function asDate(value) {
@@ -145,10 +148,13 @@ function dailyService(row) {
     amountCents: row.decision_amount_cents === null
       ? (row.billing_type === "flat" ? Number(row.price_cents) : null)
       : Number(row.decision_amount_cents),
-    decision: row.decision || (chargePaid ? "approved" : null),
+    decision: chargePaid ? "approved" : row.decision,
     chargeStatus: row.charge_status,
     paymentMethod: row.payment_method,
-    decidedAt: row.decided_at
+    decidedAt: row.decided_at,
+    tipId: row.tip_id,
+    tipAmountCents: row.tip_amount_cents === null ? null : Number(row.tip_amount_cents),
+    tipSource: row.tip_source
   };
 }
 
@@ -165,7 +171,8 @@ async function dailyServices(client, organizationId, date, bookingId = null) {
             p.city, p.state, p.postal_code, st.name AS service_name,
             spd.hourly_minutes, spd.amount_cents AS decision_amount_cents,
             spd.decision, spd.decided_at, cc.status AS charge_status,
-            pay.method AS payment_method
+            pay.method AS payment_method, tip.id AS tip_id,
+            tip.amount_cents AS tip_amount_cents, tip.source AS tip_source
      FROM bookings b
      JOIN customers c ON c.id = b.customer_id AND c.organization_id = b.organization_id
      JOIN properties p ON p.id = b.property_id AND p.organization_id = b.organization_id
@@ -176,6 +183,8 @@ async function dailyServices(client, organizationId, date, bookingId = null) {
        ON cc.booking_id = b.id AND cc.organization_id = b.organization_id
       AND cc.type = 'service'
      LEFT JOIN payments pay ON pay.id = spd.payment_id
+     LEFT JOIN tips tip
+       ON tip.booking_id = b.id AND tip.organization_id = b.organization_id
      WHERE b.organization_id = $1
        AND COALESCE(b.service_date, CAST(b.scheduled_start AS date)) = $2
        AND b.status NOT IN ('cancelled', 'rescheduled')
@@ -208,6 +217,55 @@ async function ownedCustomer(client, organizationId, customerId) {
   );
   if (!result.rowCount) throw new HttpError(404, "not_found", "Customer not found");
   return result.rows[0];
+}
+
+async function applyAvailableCredits(
+  client,
+  organizationId,
+  customerId,
+  chargeId,
+  outstandingCents
+) {
+  if (outstandingCents <= 0) return { appliedCents: 0, remainingCents: 0 };
+  const credits = await client.query(
+    `SELECT cr.id, cr.source_payment_id, cr.remaining_cents
+     FROM customer_credits cr
+     JOIN payments p
+       ON p.id = cr.source_payment_id AND p.organization_id = cr.organization_id
+     WHERE cr.organization_id = $1 AND cr.customer_id = $2
+       AND cr.remaining_cents > 0 AND p.status = 'recorded'
+     ORDER BY cr.created_at, cr.id`,
+    [organizationId, customerId]
+  );
+  let remainingCents = outstandingCents;
+  let appliedCents = 0;
+  for (const credit of credits.rows) {
+    if (!remainingCents) break;
+    const amountCents = Math.min(remainingCents, Number(credit.remaining_cents));
+    await client.query(
+      `INSERT INTO payment_allocations (payment_id, charge_id, amount_cents)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (payment_id, charge_id) DO UPDATE SET
+         amount_cents = payment_allocations.amount_cents + EXCLUDED.amount_cents`,
+      [credit.source_payment_id, chargeId, amountCents]
+    );
+    await client.query(
+      `UPDATE customer_credits
+       SET remaining_cents = remaining_cents - $3
+       WHERE id = $1 AND organization_id = $2`,
+      [credit.id, organizationId, amountCents]
+    );
+    remainingCents -= amountCents;
+    appliedCents += amountCents;
+  }
+  if (!remainingCents) {
+    await client.query(
+      `UPDATE customer_charges SET status = 'paid'
+       WHERE id = $1 AND organization_id = $2`,
+      [chargeId, organizationId]
+    );
+  }
+  return { appliedCents, remainingCents };
 }
 
 async function payrollPeriod(client, organizationId, id) {
@@ -288,6 +346,19 @@ async function recalculatePayroll(client, organizationId, periodId) {
      ORDER BY work_date, employee_id`,
     [periodId, organizationId]
   );
+  const serviceTipRows = await client.query(
+    `SELECT tip.id, tip.amount_cents, ja.employee_id,
+            COALESCE(b.service_date, CAST(b.scheduled_start AS date)) AS work_date
+     FROM tips tip
+     JOIN bookings b
+       ON b.id = tip.booking_id AND b.organization_id = tip.organization_id
+     JOIN job_assignments ja ON ja.booking_id = b.id
+     WHERE tip.organization_id = $1
+       AND COALESCE(b.service_date, CAST(b.scheduled_start AS date))
+         BETWEEN $2 AND $3
+     ORDER BY tip.id, ja.employee_id`,
+    [organizationId, period.starts_on, period.ends_on]
+  );
   const captainRows = await client.query(
     `SELECT DISTINCT tm.employee_id
      FROM team_members tm
@@ -322,14 +393,33 @@ async function recalculatePayroll(client, organizationId, periodId) {
       (membership) => membership.employee_id === day.employee_id
     ))
     .map((day) => ({ employeeId: day.employee_id, workDate: asDate(day.work_date) }));
+  const tips = new Map();
+  for (const row of serviceTipRows.rows) {
+    const tip = tips.get(row.id) || {
+      amountCents: Number(row.amount_cents),
+      workDate: asDate(row.work_date),
+      employeeIds: []
+    };
+    tip.employeeIds.push(row.employee_id);
+    tips.set(row.id, tip);
+  }
+  const serviceTipShares = [...tips.values()].flatMap((tip) =>
+    splitTip(tip.amountCents, tip.employeeIds).map((share) => ({
+      ...share,
+      workDate: tip.workDate
+    }))
+  );
   const calculated = calculatePayroll({
     employees,
     entries,
-    tipShares: dayRows.rows.map((row) => ({
-      employeeId: row.employee_id,
-      workDate: asDate(row.work_date),
-      amountCents: Number(row.tips_cents)
-    })),
+    tipShares: [
+      ...dayRows.rows.map((row) => ({
+        employeeId: row.employee_id,
+        workDate: asDate(row.work_date),
+        amountCents: Number(row.tips_cents)
+      })),
+      ...serviceTipShares
+    ],
     captainDays,
     captainReimbursementCents: Number(settings.rows[0]?.captain_reimbursement_cents ?? 1600)
   });
@@ -350,6 +440,27 @@ async function recalculatePayroll(client, organizationId, periodId) {
   }
 }
 
+async function recalculatePayrollsForBooking(client, organizationId, bookingId) {
+  const booking = await client.query(
+    `SELECT COALESCE(service_date, CAST(scheduled_start AS date)) AS work_date
+     FROM bookings
+     WHERE id = $1 AND organization_id = $2`,
+    [bookingId, organizationId]
+  );
+  if (!booking.rowCount) {
+    throw new HttpError(404, "not_found", "Booking not found");
+  }
+  const periods = await client.query(
+    `SELECT id FROM payroll_periods
+     WHERE organization_id = $1 AND status = 'review'
+       AND $2 BETWEEN starts_on AND ends_on`,
+    [organizationId, booking.rows[0].work_date]
+  );
+  for (const period of periods.rows) {
+    await recalculatePayroll(client, organizationId, period.id);
+  }
+}
+
 export function createFinanceRouter({ pool }) {
   const router = Router();
   router.use(requireRole("manager"));
@@ -367,6 +478,16 @@ export function createFinanceRouter({ pool }) {
     const input = validate(paymentDecisionSchema, req.body);
     const organizationId = req.auth.organizationId;
     const result = await transaction(pool, async (client) => {
+      const lockedBooking = await client.query(
+        `SELECT id FROM bookings
+         WHERE id = $1 AND organization_id = $2
+           AND status NOT IN ('cancelled', 'rescheduled')
+         FOR UPDATE`,
+        [bookingId, organizationId]
+      );
+      if (!lockedBooking.rowCount) {
+        throw new HttpError(404, "not_found", "Scheduled service not found");
+      }
       const bookingResult = await client.query(
         `SELECT b.*, COALESCE(b.service_date, CAST(b.scheduled_start AS date)) AS work_date,
                 c.payment_method AS customer_payment_method, st.name AS service_name
@@ -405,7 +526,8 @@ export function createFinanceRouter({ pool }) {
                 c.description, c.amount_cents, c.status, c.charged_on, c.created_at,
                 COALESCE(SUM(pa.amount_cents), 0) AS allocated_cents
          FROM customer_charges c
-         LEFT JOIN payment_allocations pa ON pa.charge_id = c.id
+         LEFT JOIN payment_allocations pa
+           ON pa.charge_id = c.id AND pa.reversed_at IS NULL
          WHERE c.organization_id = $1 AND c.booking_id = $2 AND c.type = 'service'
          GROUP BY c.id, c.organization_id, c.customer_id, c.booking_id, c.type,
                   c.description, c.amount_cents, c.status, c.charged_on, c.created_at
@@ -414,10 +536,18 @@ export function createFinanceRouter({ pool }) {
         [organizationId, bookingId]
       );
       let chargeId = chargeResult.rows[0]?.id;
+      let allocatedCents = Number(chargeResult.rows[0]?.allocated_cents || 0);
       if (chargeResult.rowCount) {
         const charge = chargeResult.rows[0];
-        if (charge.status === "paid" || Number(charge.allocated_cents) > 0) {
+        if (charge.status === "paid") {
           throw new HttpError(409, "service_already_paid", "This service already has a recorded payment");
+        }
+        if (allocatedCents > amountCents) {
+          throw new HttpError(
+            409,
+            "service_amount_below_credit",
+            "The service amount cannot be less than credit already applied"
+          );
         }
         await client.query(
           `UPDATE customer_charges
@@ -441,9 +571,18 @@ export function createFinanceRouter({ pool }) {
           ]
         );
       }
+      const credit = await applyAvailableCredits(
+        client,
+        organizationId,
+        booking.customer_id,
+        chargeId,
+        amountCents - allocatedCents
+      );
+      allocatedCents += credit.appliedCents;
+      const outstandingCents = amountCents - allocatedCents;
       let paymentId = null;
       let paymentMethod = null;
-      if (input.decision === "approved") {
+      if (input.decision === "approved" && outstandingCents > 0) {
         const supportedMethods = new Set(["zelle", "venmo", "paypal", "cash", "check"]);
         paymentMethod = input.paymentMethod
           || (supportedMethods.has(booking.customer_payment_method)
@@ -456,14 +595,14 @@ export function createFinanceRouter({ pool }) {
            VALUES ($1, $2, $3, $4, $5, $6, now(), $7)`,
           [
             paymentId, organizationId, booking.customer_id, req.auth.id,
-            paymentMethod, amountCents,
+            paymentMethod, outstandingCents,
             `${booking.service_name} - ${asDate(booking.work_date)}`
           ]
         );
         await client.query(
           `INSERT INTO payment_allocations (payment_id, charge_id, amount_cents)
            VALUES ($1, $2, $3)`,
-          [paymentId, chargeId, amountCents]
+          [paymentId, chargeId, outstandingCents]
         );
         await client.query(
           `UPDATE customer_charges SET status = 'paid'
@@ -471,6 +610,7 @@ export function createFinanceRouter({ pool }) {
           [chargeId, organizationId]
         );
       }
+      const effectiveDecision = outstandingCents === 0 ? "approved" : input.decision;
       const decisionId = previous.rows[0]?.id || crypto.randomUUID();
       await client.query(
         `INSERT INTO service_payment_decisions
@@ -488,7 +628,7 @@ export function createFinanceRouter({ pool }) {
            updated_at = now()`,
         [
           decisionId, organizationId, bookingId, chargeId, paymentId,
-          input.decision, hourlyMinutes, amountCents, req.auth.id
+          effectiveDecision, hourlyMinutes, amountCents, req.auth.id
         ]
       );
       await recordAudit(client, req.auth, {
@@ -496,7 +636,15 @@ export function createFinanceRouter({ pool }) {
         entityId: decisionId,
         action: previous.rowCount ? "update" : "create",
         before: previous.rows[0] || null,
-        after: { bookingId, ...input, hourlyMinutes, amountCents, paymentId }
+        after: {
+          bookingId,
+          ...input,
+          decision: effectiveDecision,
+          hourlyMinutes,
+          amountCents,
+          creditAppliedCents: credit.appliedCents,
+          paymentId
+        }
       });
       return {
         date: asDate(booking.work_date),
@@ -513,7 +661,8 @@ export function createFinanceRouter({ pool }) {
     const [payments, declined, credits] = await Promise.all([
       pool.query(
         `SELECT p.id, p.customer_id, c.name AS customer_name, p.amount_cents,
-                p.method, p.paid_at, p.reference, st.name AS service_name,
+                p.method, p.paid_at, p.reference, p.status,
+                p.reversed_at, p.reversal_reason, st.name AS service_name,
                 COALESCE(b.service_date, CAST(b.scheduled_start AS date)) AS service_date
          FROM payments p
          JOIN customers c ON c.id = p.customer_id AND c.organization_id = p.organization_id
@@ -525,16 +674,18 @@ export function createFinanceRouter({ pool }) {
         [organizationId]
       ),
       pool.query(
-        `SELECT spd.id, spd.booking_id, spd.amount_cents, spd.hourly_minutes,
-                spd.decided_at, c.id AS customer_id, c.name AS customer_name,
+        `SELECT ch.id, ch.booking_id, ch.amount_cents, ch.type, ch.description,
+                ch.charged_on, c.id AS customer_id, c.name AS customer_name,
                 c.phone AS customer_phone, st.name AS service_name,
                 COALESCE(b.service_date, CAST(b.scheduled_start AS date)) AS service_date
-         FROM service_payment_decisions spd
-         JOIN bookings b ON b.id = spd.booking_id AND b.organization_id = spd.organization_id
-         JOIN customers c ON c.id = b.customer_id
-         JOIN service_types st ON st.id = b.service_type_id
-         WHERE spd.organization_id = $1 AND spd.decision = 'declined'
-         ORDER BY service_date DESC, c.name`,
+         FROM customer_charges ch
+         JOIN customers c
+           ON c.id = ch.customer_id AND c.organization_id = ch.organization_id
+         LEFT JOIN bookings b
+           ON b.id = ch.booking_id AND b.organization_id = ch.organization_id
+         LEFT JOIN service_types st ON st.id = b.service_type_id
+         WHERE ch.organization_id = $1 AND ch.status = 'unpaid'
+         ORDER BY ch.charged_on DESC, c.name`,
         [organizationId]
       ),
       pool.query(
@@ -556,6 +707,9 @@ export function createFinanceRouter({ pool }) {
         method: row.method,
         paidAt: row.paid_at,
         reference: row.reference,
+        status: row.status,
+        reversedAt: row.reversed_at,
+        reversalReason: row.reversal_reason,
         serviceName: row.service_name,
         serviceDate: row.service_date ? asDate(row.service_date) : null
       })),
@@ -566,10 +720,11 @@ export function createFinanceRouter({ pool }) {
         customerName: row.customer_name,
         customerPhone: row.customer_phone,
         serviceName: row.service_name,
-        serviceDate: asDate(row.service_date),
+        serviceDate: row.service_date ? asDate(row.service_date) : null,
         amountCents: Number(row.amount_cents),
-        hourlyMinutes: row.hourly_minutes === null ? null : Number(row.hourly_minutes),
-        decidedAt: row.decided_at
+        chargeType: row.type,
+        description: row.description,
+        chargedOn: asDate(row.charged_on)
       })),
       credits: credits.rows.map((row) => ({
         id: row.id,
@@ -602,14 +757,17 @@ export function createFinanceRouter({ pool }) {
       pool.query(
         `SELECT c.customer_id, COALESCE(SUM(pa.amount_cents), 0) AS allocated_cents
          FROM customer_charges c
-         JOIN payment_allocations pa ON pa.charge_id = c.id
+         JOIN payment_allocations pa
+           ON pa.charge_id = c.id AND pa.reversed_at IS NULL
          WHERE c.organization_id = $1 AND c.status NOT IN ('waived', 'credited')
          GROUP BY c.customer_id`,
         [organizationId]
       ),
       pool.query(
         `SELECT customer_id, COALESCE(SUM(amount_cents), 0) AS paid_cents
-         FROM payments WHERE organization_id = $1 GROUP BY customer_id`,
+         FROM payments
+         WHERE organization_id = $1 AND status = 'recorded'
+         GROUP BY customer_id`,
         [organizationId]
       ),
       pool.query(
@@ -665,7 +823,8 @@ export function createFinanceRouter({ pool }) {
                 c.created_at AS "createdAt",
                 COALESCE(SUM(pa.amount_cents), 0) AS "paidCents"
          FROM customer_charges c
-         LEFT JOIN payment_allocations pa ON pa.charge_id = c.id
+         LEFT JOIN payment_allocations pa
+           ON pa.charge_id = c.id AND pa.reversed_at IS NULL
          WHERE c.organization_id = $1 AND c.customer_id = $2
          GROUP BY c.id, c.booking_id, c.type, c.description, c.amount_cents,
                   c.status, c.charged_on, c.created_at
@@ -676,7 +835,7 @@ export function createFinanceRouter({ pool }) {
         `SELECT id, method, amount_cents AS "amountCents", paid_at AS "paidAt",
                 reference, created_at AS "createdAt"
          FROM payments
-         WHERE organization_id = $1 AND customer_id = $2
+         WHERE organization_id = $1 AND customer_id = $2 AND status = 'recorded'
          ORDER BY paid_at, created_at, id`,
         [organizationId, customerId]
       ),
@@ -750,7 +909,26 @@ export function createFinanceRouter({ pool }) {
         action: "create",
         after: input
       });
-      return result.rows[0];
+      const credit = await applyAvailableCredits(
+        client,
+        organizationId,
+        customerId,
+        id,
+        input.amountCents
+      );
+      if (credit.appliedCents) {
+        await recordAudit(client, req.auth, {
+          entityType: "customer_credit",
+          entityId: id,
+          action: "apply",
+          after: { chargeId: id, amountCents: credit.appliedCents }
+        });
+      }
+      const current = await client.query(
+        "SELECT * FROM customer_charges WHERE id = $1 AND organization_id = $2",
+        [id, organizationId]
+      );
+      return current.rows[0];
     });
     data(res, {
       charge: {
@@ -786,7 +964,8 @@ export function createFinanceRouter({ pool }) {
         `SELECT c.id, c.amount_cents,
                 COALESCE(SUM(pa.amount_cents), 0) AS allocated_cents
          FROM customer_charges c
-         LEFT JOIN payment_allocations pa ON pa.charge_id = c.id
+         LEFT JOIN payment_allocations pa
+           ON pa.charge_id = c.id AND pa.reversed_at IS NULL
          WHERE c.organization_id = $1 AND c.customer_id = $2 AND c.status = 'unpaid'
          GROUP BY c.id, c.amount_cents, c.charged_on, c.created_at
          ORDER BY c.charged_on, c.created_at, c.id`,
@@ -845,11 +1024,160 @@ export function createFinanceRouter({ pool }) {
     data(res, result, 201);
   }));
 
+  router.post("/charges/:id/waive", asyncRoute(async (req, res) => {
+    const id = validate(uuid, req.params.id);
+    const input = validate(correctionReasonSchema, req.body);
+    const organizationId = req.auth.organizationId;
+    const charge = await transaction(pool, async (client) => {
+      const current = await client.query(
+        "SELECT * FROM customer_charges WHERE id = $1 AND organization_id = $2",
+        [id, organizationId]
+      );
+      if (!current.rowCount) throw new HttpError(404, "not_found", "Charge not found");
+      const before = current.rows[0];
+      const allocation = await client.query(
+        `SELECT COALESCE(SUM(amount_cents), 0) AS allocated_cents
+         FROM payment_allocations
+         WHERE charge_id = $1 AND reversed_at IS NULL`,
+        [id]
+      );
+      if (before.status !== "unpaid"
+        || Number(allocation.rows[0].allocated_cents) > 0) {
+        throw new HttpError(409, "charge_not_waivable", "Only an unpaid charge without a payment can be waived");
+      }
+      const updated = await client.query(
+        `UPDATE customer_charges SET status = 'waived'
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [id, organizationId]
+      );
+      if (before.type === "cancellation_fee" && before.booking_id) {
+        await client.query(
+          `UPDATE bookings
+           SET cancellation_fee_waived = true, cancellation_waiver_reason = $3,
+               updated_at = now()
+           WHERE id = $1 AND organization_id = $2`,
+          [before.booking_id, organizationId, input.reason]
+        );
+      }
+      await recordAudit(client, req.auth, {
+        entityType: "customer_charge",
+        entityId: id,
+        action: "waive",
+        before,
+        after: { ...updated.rows[0], reason: input.reason },
+        reason: input.reason
+      });
+      return updated.rows[0];
+    });
+    data(res, {
+      charge: {
+        id: charge.id,
+        customerId: charge.customer_id,
+        bookingId: charge.booking_id,
+        status: charge.status
+      }
+    });
+  }));
+
+  router.post("/payments/:id/reverse", asyncRoute(async (req, res) => {
+    const id = validate(uuid, req.params.id);
+    const input = validate(correctionReasonSchema, req.body);
+    const organizationId = req.auth.organizationId;
+    const payment = await transaction(pool, async (client) => {
+      const current = await client.query(
+        "SELECT * FROM payments WHERE id = $1 AND organization_id = $2",
+        [id, organizationId]
+      );
+      if (!current.rowCount) throw new HttpError(404, "not_found", "Payment not found");
+      const before = current.rows[0];
+      if (before.status === "reversed") {
+        throw new HttpError(409, "payment_already_reversed", "This payment is already reversed");
+      }
+      const allocations = await client.query(
+        `SELECT charge_id FROM payment_allocations
+         WHERE payment_id = $1 AND reversed_at IS NULL`,
+        [id]
+      );
+      await client.query(
+        `UPDATE payment_allocations
+         SET reversed_at = now(), reversal_reason = $2
+         WHERE payment_id = $1 AND reversed_at IS NULL`,
+        [id, input.reason]
+      );
+      for (const { charge_id: chargeId } of allocations.rows) {
+        const remaining = await client.query(
+          `SELECT c.amount_cents,
+                  COALESCE(SUM(pa.amount_cents), 0) AS allocated_cents
+           FROM customer_charges c
+           LEFT JOIN payment_allocations pa
+             ON pa.charge_id = c.id AND pa.reversed_at IS NULL
+           WHERE c.id = $1 AND c.organization_id = $2
+           GROUP BY c.id, c.amount_cents`,
+          [chargeId, organizationId]
+        );
+        const paid = Number(remaining.rows[0]?.allocated_cents || 0)
+          >= Number(remaining.rows[0]?.amount_cents || 0);
+        await client.query(
+          `UPDATE customer_charges SET status = $3
+           WHERE id = $1 AND organization_id = $2
+             AND status NOT IN ('waived', 'credited')`,
+          [chargeId, organizationId, paid ? "paid" : "unpaid"]
+        );
+      }
+      await client.query(
+        `UPDATE customer_credits
+         SET remaining_cents = 0, reason = $3
+         WHERE source_payment_id = $1 AND organization_id = $2`,
+        [id, organizationId, `Payment reversed: ${input.reason}`]
+      );
+      await client.query(
+        `UPDATE service_payment_decisions
+         SET decision = 'declined', payment_id = NULL, updated_at = now()
+         WHERE payment_id = $1 AND organization_id = $2`,
+        [id, organizationId]
+      );
+      const updated = await client.query(
+        `UPDATE payments
+         SET status = 'reversed', reversed_at = now(), reversed_by = $3,
+             reversal_reason = $4
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [id, organizationId, req.auth.id, input.reason]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "payment",
+        entityId: id,
+        action: "reverse",
+        before,
+        after: updated.rows[0],
+        reason: input.reason
+      });
+      return updated.rows[0];
+    });
+    data(res, {
+      payment: {
+        id: payment.id,
+        customerId: payment.customer_id,
+        status: payment.status,
+        reversedAt: payment.reversed_at,
+        reversalReason: payment.reversal_reason
+      }
+    });
+  }));
+
   router.post("/bookings/:bookingId/tips", asyncRoute(async (req, res) => {
     const bookingId = validate(uuid, req.params.bookingId);
     const input = validate(tipSchema, req.body);
     const organizationId = req.auth.organizationId;
     const result = await transaction(pool, async (client) => {
+      const existing = await client.query(
+        "SELECT id FROM tips WHERE booking_id = $1 AND organization_id = $2",
+        [bookingId, organizationId]
+      );
+      if (existing.rowCount) {
+        throw new HttpError(409, "tip_already_recorded", "This service already has a recorded tip");
+      }
       const employees = await client.query(
         `SELECT e.id
          FROM bookings b
@@ -876,9 +1204,53 @@ export function createFinanceRouter({ pool }) {
         action: "create",
         after: { bookingId, ...input, shares }
       });
+      await recalculatePayrollsForBooking(client, organizationId, bookingId);
       return { tip: { id, bookingId, ...input }, shares };
     });
     data(res, result, 201);
+  }));
+
+  router.patch("/bookings/:bookingId/tips/:id", asyncRoute(async (req, res) => {
+    const bookingId = validate(uuid, req.params.bookingId);
+    const id = validate(uuid, req.params.id);
+    const input = validate(tipSchema, req.body);
+    const organizationId = req.auth.organizationId;
+    const result = await transaction(pool, async (client) => {
+      const current = await client.query(
+        `SELECT * FROM tips
+         WHERE id = $1 AND booking_id = $2 AND organization_id = $3`,
+        [id, bookingId, organizationId]
+      );
+      if (!current.rowCount) throw new HttpError(404, "not_found", "Tip not found");
+      const employees = await client.query(
+        `SELECT e.id
+         FROM job_assignments ja
+         JOIN employees e ON e.id = ja.employee_id
+         WHERE ja.booking_id = $1 AND e.organization_id = $2
+         ORDER BY e.id`,
+        [bookingId, organizationId]
+      );
+      if (!employees.rowCount) {
+        throw new HttpError(409, "tip_assignments_required", "Assign employees before recording a tip");
+      }
+      const updated = await client.query(
+        `UPDATE tips SET amount_cents = $4, source = $5
+         WHERE id = $1 AND booking_id = $2 AND organization_id = $3
+         RETURNING *`,
+        [id, bookingId, organizationId, input.amountCents, input.source]
+      );
+      const shares = splitTip(input.amountCents, employees.rows.map(({ id: employeeId }) => employeeId));
+      await recordAudit(client, req.auth, {
+        entityType: "tip",
+        entityId: id,
+        action: "update",
+        before: current.rows[0],
+        after: { bookingId, ...input, shares }
+      });
+      await recalculatePayrollsForBooking(client, organizationId, bookingId);
+      return { tip: { id, bookingId, ...input }, shares };
+    });
+    data(res, result);
   }));
 
   router.post("/time-entries/:id/corrections", asyncRoute(async (req, res) => {
@@ -1047,6 +1419,7 @@ export function createFinanceRouter({ pool }) {
           );
         }
       }
+      await recalculatePayroll(client, organizationId, periodId);
       await recordAudit(client, req.auth, {
         entityType: "payroll_period",
         entityId: periodId,
@@ -1073,8 +1446,8 @@ export function createFinanceRouter({ pool }) {
       throw new HttpError(400, "invalid_time_range", "Final check-out must be after first check-in");
     }
     const weekday = new Date(`${input.workDate}T00:00:00.000Z`).getUTCDay();
-    if (weekday < 1 || weekday > 5) {
-      throw new HttpError(400, "invalid_work_date", "Payroll hour entries must be Monday through Friday");
+    if (weekday < 1 || weekday > 6) {
+      throw new HttpError(400, "invalid_work_date", "Payroll hour entries must be Monday through Saturday");
     }
     const organizationId = req.auth.organizationId;
     const result = await transaction(pool, async (client) => {

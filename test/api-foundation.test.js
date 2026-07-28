@@ -145,6 +145,35 @@ describe("authenticated API foundation", () => {
     assert.equal(crossOrigin.body.error.code, "origin_not_allowed");
   });
 
+  it("requires temporary-password users to set a private password", async () => {
+    const { pool, ids, request, login } = await fixture();
+    await pool.query(
+      "UPDATE users SET must_change_password = true WHERE id = $1",
+      [ids.manager]
+    );
+    const signedIn = await login("manager@example.com");
+    assert.equal(signedIn.response.status, 200);
+    assert.equal(signedIn.body.data.user.mustChangePassword, true);
+
+    const blocked = await request("/api/dashboard", { cookie: signedIn.cookie });
+    assert.equal(blocked.response.status, 403);
+    assert.equal(blocked.body.error.code, "password_change_required");
+
+    const changed = await request("/api/auth/change-password", {
+      method: "POST",
+      cookie: signedIn.cookie,
+      body: JSON.stringify({
+        currentPassword: "correct-horse",
+        newPassword: "private-correct-horse"
+      })
+    });
+    assert.equal(changed.response.status, 200);
+    const unblocked = await request("/api/dashboard", { cookie: signedIn.cookie });
+    assert.equal(unblocked.response.status, 200);
+    const me = await request("/api/auth/me", { cookie: signedIn.cookie });
+    assert.equal(me.body.data.user.mustChangePassword, false);
+  });
+
   it("accepts explicitly configured frontend origins", async () => {
     const previous = process.env.ALLOWED_ORIGINS;
     process.env.ALLOWED_ORIGINS = "http://localhost:5180";

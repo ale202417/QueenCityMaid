@@ -52,6 +52,23 @@ describe("recurring service dates", () => {
       ["2026-07-13", "2026-08-10", "2026-09-14"]
     );
   });
+
+  it("supports a finite list of individual service dates", () => {
+    assert.deepEqual(
+      recurrenceDates("2026-08-01", {
+        type: "dates",
+        dates: ["2026-09-03", "2026-08-04", "2026-08-19"]
+      }, 2),
+      ["2026-08-04", "2026-08-19"]
+    );
+    assert.throws(
+      () => recurrenceDates("2026-08-01", {
+        type: "dates",
+        dates: ["2026-08-04", "2026-08-04"]
+      }, 2),
+      /duplicates/
+    );
+  });
 });
 
 describe("tips and payroll", () => {

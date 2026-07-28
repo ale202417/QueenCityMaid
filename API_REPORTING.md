@@ -11,6 +11,8 @@ Money is returned as integer cents. Date ranges are inclusive and use
 | `GET` | `/reports/compare` | Compare two date ranges and classify the trend |
 | `GET` | `/expenses?from=...&to=...` | List recorded operating expenses |
 | `POST` | `/expenses` | Record supplies, fuel, equipment, software, or another expense |
+| `PATCH` | `/expenses/:id` | Correct a recorded expense |
+| `POST` | `/expenses/:id/void` | Void an expense with a required reason while preserving history |
 
 ## Financial Reports
 

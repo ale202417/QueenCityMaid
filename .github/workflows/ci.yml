@@ -11,6 +11,22 @@ jobs:
   test-and-build:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_DB: queen_city_maid_test
+          POSTGRES_PASSWORD: test-password
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d queen_city_maid_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      MIGRATION_DATABASE_URL: postgres://postgres:test-password@127.0.0.1:5432/queen_city_maid_test
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -19,4 +35,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - run: npm run test:migration-upgrade
       - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e

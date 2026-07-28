@@ -239,6 +239,43 @@ describe("finance", () => {
       creditCents: 2000
     });
     assert.ok(ledger.body.data.charges.every(({ status }) => status === "paid"));
+    const creditedCharge = await createCharge(
+      request,
+      ids.customerA,
+      2000,
+      "2026-07-25"
+    );
+    assert.equal(creditedCharge.status, "paid");
+    const afterCredit = await request(`/api/customers/${ids.customerA}/ledger`);
+    assert.equal(afterCredit.body.data.totals.creditCents, 0);
+    assert.equal(afterCredit.body.data.totals.outstandingCents, 0);
+
+    const reversed = await request(`/api/payments/${payment.body.data.payment.id}/reverse`, {
+      method: "POST",
+      body: { reason: "Manager entered the payment twice" }
+    });
+    assert.equal(reversed.response.status, 200, JSON.stringify(reversed.body));
+    assert.equal(reversed.body.data.payment.status, "reversed");
+    const preservedAllocations = await pool.query(
+      `SELECT amount_cents, reversed_at, reversal_reason
+       FROM payment_allocations
+       WHERE payment_id = $1
+       ORDER BY charge_id`,
+      [payment.body.data.payment.id]
+    );
+    assert.equal(preservedAllocations.rowCount, 3);
+    assert.ok(preservedAllocations.rows.every((allocation) => allocation.reversed_at));
+    assert.ok(preservedAllocations.rows.every(
+      (allocation) => allocation.reversal_reason === "Manager entered the payment twice"
+    ));
+    const correctedLedger = await request(`/api/customers/${ids.customerA}/ledger`);
+    assert.equal(correctedLedger.body.data.totals.outstandingCents, 17000);
+    assert.equal(correctedLedger.body.data.totals.creditCents, 0);
+    const repeatedReversal = await request(`/api/payments/${payment.body.data.payment.id}/reverse`, {
+      method: "POST",
+      body: { reason: "Repeated correction" }
+    });
+    assert.equal(repeatedReversal.response.status, 409);
 
     const invalid = await request(`/api/customers/${ids.customerA}/payments`, {
       method: "POST",
@@ -256,7 +293,7 @@ describe("finance", () => {
        WHERE organization_id = $1 AND entity_type IN ('customer_charge', 'payment')`,
       [ids.organizationA]
     );
-    assert.equal(audit.rowCount, 3);
+    assert.equal(audit.rowCount, 5);
   });
 
   it("turns the daily schedule into approved payments and declined balances", async () => {
@@ -348,6 +385,20 @@ describe("finance", () => {
       }
     );
 
+    const waived = await request(`/api/charges/${records.body.data.declined[0].id}/waive`, {
+      method: "POST",
+      body: { reason: "Manager approved a courtesy waiver" }
+    });
+    assert.equal(waived.response.status, 200, JSON.stringify(waived.body));
+    assert.equal(waived.body.data.charge.status, "waived");
+    const noOutstanding = await request("/api/payments/overview");
+    assert.equal(noOutstanding.body.data.customers[0].outstandingCents, 0);
+    const repeatedWaiver = await request(`/api/charges/${records.body.data.declined[0].id}/waive`, {
+      method: "POST",
+      body: { reason: "Repeated waiver" }
+    });
+    assert.equal(repeatedWaiver.response.status, 409);
+
     const laterApproved = await request(`/api/payments/daily/${hourlyBooking}/decision`, {
       method: "POST",
       body: { decision: "approved", hourlyMinutes: 120, paymentMethod: "zelle" }
@@ -355,11 +406,34 @@ describe("finance", () => {
     assert.equal(laterApproved.response.status, 200, JSON.stringify(laterApproved.body));
     assert.equal(laterApproved.body.data.service.decision, "approved");
 
+    const correctedRecords = await request("/api/payments/records");
+    const venmoPayment = correctedRecords.body.data.payments.find(
+      (item) => item.method === "venmo"
+    );
+    const reversed = await request(`/api/payments/${venmoPayment.id}/reverse`, {
+      method: "POST",
+      body: { reason: "Wrong payment was approved" }
+    });
+    assert.equal(reversed.response.status, 200, JSON.stringify(reversed.body));
+    const afterReversal = await request("/api/payments/daily?date=2026-07-20");
+    const correctedService = afterReversal.body.data.services.find(
+      (item) => item.bookingId === ids.bookingA
+    );
+    assert.equal(correctedService.decision, "declined");
+    assert.equal(correctedService.chargeStatus, "unpaid");
+
     const denied = await request("/api/payments/records", {
       role: "cleaner",
       userId: ids.cleanerA
     });
     assert.equal(denied.response.status, 403);
+    const reverseDenied = await request(`/api/payments/${venmoPayment.id}/reverse`, {
+      method: "POST",
+      role: "cleaner",
+      userId: ids.cleanerA,
+      body: { reason: "Not allowed" }
+    });
+    assert.equal(reverseDenied.response.status, 403);
     const isolated = await request("/api/payments/daily?date=2026-07-20", {
       organizationId: ids.organizationB,
       userId: ids.managerB
@@ -386,6 +460,14 @@ describe("finance", () => {
       tip.body.data.shares.reduce((sum, share) => sum + share.amountCents, 0),
       1001
     );
+    const serviceTipByEmployee = new Map(
+      tip.body.data.shares.map((share) => [share.employeeId, share.amountCents])
+    );
+    const duplicateTip = await request(`/api/bookings/${ids.bookingA}/tips`, {
+      method: "POST",
+      body: { amountCents: 1001, source: "customer" }
+    });
+    assert.equal(duplicateTip.response.status, 409);
 
     const correction = await request(`/api/time-entries/${ids.timeA1}/corrections`, {
       method: "POST",
@@ -413,6 +495,35 @@ describe("finance", () => {
     assert.equal(period.lines.length, 4);
     assert.equal(period.dayEntries.length, 0);
     assert.ok(period.lines.every((line) => line.regularMinutes === 0));
+    assert.equal(
+      period.lines.reduce((sum, line) => sum + line.tipsCents, 0),
+      1001
+    );
+
+    const revisedTip = await request(
+      `/api/bookings/${ids.bookingA}/tips/${tip.body.data.tip.id}`,
+      {
+        method: "PATCH",
+        body: { amountCents: 1201, source: "manager" }
+      }
+    );
+    assert.equal(revisedTip.response.status, 200, JSON.stringify(revisedTip.body));
+    const tipRecalculated = await request(`/api/payroll-periods/${period.id}`);
+    assert.equal(
+      tipRecalculated.body.data.payrollPeriod.lines.reduce(
+        (sum, line) => sum + line.tipsCents,
+        0
+      ),
+      1201
+    );
+    const restoredTip = await request(
+      `/api/bookings/${ids.bookingA}/tips/${tip.body.data.tip.id}`,
+      {
+        method: "PATCH",
+        body: { amountCents: 1001, source: "customer" }
+      }
+    );
+    assert.equal(restoredTip.response.status, 200);
 
     const captainDay = await request(`/api/payroll-periods/${period.id}/days`, {
       method: "POST",
@@ -421,7 +532,7 @@ describe("finance", () => {
         workDate: "2026-07-20",
         checkInTime: "08:00",
         checkOutTime: "17:00",
-        tipsCents: 1001
+        tipsCents: 0
       }
     });
     assert.equal(captainDay.response.status, 200, JSON.stringify(captainDay.body));
@@ -430,10 +541,13 @@ describe("finance", () => {
       (line) => line.employeeId === ids.employeeA1 && line.weekStartsOn === "2026-07-20"
     );
     assert.equal(captain.regularMinutes, 540);
-    assert.equal(captain.tipsCents, 1001);
+    assert.equal(captain.tipsCents, serviceTipByEmployee.get(ids.employeeA1));
     assert.equal(captain.captainDays, 1);
     assert.equal(captain.captainReimbursementCents, 1600);
-    assert.equal(captain.grossWagesCents, 20601);
+    assert.equal(
+      captain.grossWagesCents,
+      19600 + serviceTipByEmployee.get(ids.employeeA1)
+    );
 
     const cleanerDay = await request(`/api/payroll-periods/${period.id}/days`, {
       method: "POST",
@@ -485,7 +599,7 @@ describe("finance", () => {
         workDate: "2026-07-20",
         checkInTime: "08:00",
         checkOutTime: "18:00",
-        tipsCents: 1001
+        tipsCents: 0
       }
     });
     assert.equal(revised.response.status, 200, JSON.stringify(revised.body));
@@ -494,7 +608,10 @@ describe("finance", () => {
       (line) => line.employeeId === ids.employeeA1 && line.weekStartsOn === "2026-07-20"
     );
     assert.equal(captain.regularMinutes, 600);
-    assert.equal(captain.grossWagesCents, 22601);
+    assert.equal(
+      captain.grossWagesCents,
+      21600 + serviceTipByEmployee.get(ids.employeeA1)
+    );
 
     const historyList = await request("/api/payroll-periods");
     assert.equal(historyList.response.status, 200);
@@ -628,7 +745,7 @@ describe("finance", () => {
     assert.equal(invalidRange.response.status, 400);
     assert.equal(invalidRange.body.error.code, "invalid_time_range");
 
-    const weekend = await request(`/api/payroll-periods/${periodId}/days`, {
+    const saturday = await request(`/api/payroll-periods/${periodId}/days`, {
       method: "POST",
       body: {
         employeeId: ids.employeeA1,
@@ -638,8 +755,19 @@ describe("finance", () => {
         tipsCents: 0
       }
     });
-    assert.equal(weekend.response.status, 400);
-    assert.equal(weekend.body.error.code, "invalid_work_date");
+    assert.equal(saturday.response.status, 200);
+    const sunday = await request(`/api/payroll-periods/${periodId}/days`, {
+      method: "POST",
+      body: {
+        employeeId: ids.employeeA1,
+        workDate: "2026-07-26",
+        checkInTime: "08:00",
+        checkOutTime: "12:00",
+        tipsCents: 0
+      }
+    });
+    assert.equal(sunday.response.status, 400);
+    assert.equal(sunday.body.error.code, "invalid_work_date");
 
     const foreignEmployee = await request(`/api/payroll-periods/${periodId}/days`, {
       method: "POST",

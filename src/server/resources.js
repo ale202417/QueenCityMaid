@@ -3,6 +3,7 @@ import express from "express";
 import { z } from "zod";
 import { recordAudit, requireRole } from "./auth.js";
 import { HttpError, asyncRoute, data, validate } from "./http.js";
+import { detachBooking } from "./schedule-planner.js";
 
 const uuid = z.string().uuid();
 const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, "Expected YYYY-MM-DD");
@@ -109,7 +110,16 @@ const configs = [
     decorateList: addCustomerPropertyCounts,
     order: "name, created_at DESC",
     archive: { status: "inactive" },
-    timestamps: true
+    timestamps: true,
+    check: async (client, organizationId, input, before) => {
+      if (before && input.status && input.status !== before.status) {
+        throw new HttpError(
+          409,
+          "lifecycle_action_required",
+          "Use the customer pause, resume, cancel, or reactivate action"
+        );
+      }
+    }
   },
   {
     path: "properties",
@@ -154,7 +164,7 @@ const configs = [
     },
     list: z.object({ ...paging, q: searchQuery, active: queryBoolean.optional() }).strict(),
     filters: { active: "active" },
-    search: ["first_name", "last_name", "phone"],
+    search: ["first_name", "last_name", "first_name || ' ' || last_name", "phone"],
     order: "last_name, first_name",
     archive: { active: false },
     timestamps: true,
@@ -746,6 +756,142 @@ function registerCustomerCancellation(router, pool) {
       endedRecurringServices: result.recurringCount,
       cancelledBookings: result.bookingCount
     });
+  }));
+
+  router.post("/customers/:id/reactivate", route(async (req, res) => {
+    const id = idFrom(req);
+    validate(z.object({}).strict(), req.body || {});
+    const customer = await transaction(pool, async client => {
+      const before = await requireOwned(
+        client, "customers", id, req.auth.organizationId, "Customer"
+      );
+      if (before.status !== "cancelled") {
+        throw new HttpError(409, "invalid_state", "Only a cancelled customer can be reactivated");
+      }
+      const updated = await client.query(
+        `UPDATE customers
+         SET status = 'active', cancelled_at = NULL, cancellation_reason = NULL,
+             updated_at = now()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [id, req.auth.organizationId]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "customer",
+        entityId: id,
+        action: "reactivate",
+        before: apiRow(before),
+        after: apiRow(updated.rows[0])
+      });
+      return updated.rows[0];
+    });
+    data(res, { customer: apiRow(customer) });
+  }));
+
+  router.post("/customers/:id/pause", route(async (req, res) => {
+    const id = idFrom(req);
+    validate(z.object({}).strict(), req.body || {});
+    const result = await transaction(pool, async client => {
+      const before = await requireOwned(
+        client, "customers", id, req.auth.organizationId, "Customer"
+      );
+      if (before.status !== "active") {
+        throw new HttpError(409, "invalid_state", "Only an active customer can be paused");
+      }
+      const future = await client.query(
+        `SELECT id FROM bookings
+         WHERE organization_id = $1 AND customer_id = $2
+           AND scheduled_start >= now()
+           AND status IN ('requested', 'confirmed', 'assigned')`,
+        [req.auth.organizationId, id]
+      );
+      const bookingIds = future.rows.map((row) => row.id);
+      for (const bookingId of bookingIds) {
+        await detachBooking(client, req.auth.organizationId, bookingId);
+      }
+      await client.query(
+        `UPDATE notifications SET status = 'cancelled'
+         WHERE organization_id = $1 AND customer_id = $2 AND status = 'queued'
+           AND booking_id IN (
+             SELECT id FROM bookings
+             WHERE organization_id = $1 AND customer_id = $2
+               AND scheduled_start >= now()
+               AND status IN ('requested', 'confirmed', 'assigned')
+           )`,
+        [req.auth.organizationId, id]
+      );
+      await client.query(
+        `UPDATE bookings
+         SET status = 'cancelled', cancellation_reason = 'Customer service paused',
+             updated_at = now()
+         WHERE organization_id = $1 AND customer_id = $2
+           AND scheduled_start >= now()
+           AND status IN ('requested', 'confirmed', 'assigned')`,
+        [req.auth.organizationId, id]
+      );
+      const plans = await client.query(
+        `UPDATE recurring_services
+         SET status = 'paused', paused_at = now(), updated_at = now()
+         WHERE organization_id = $1 AND customer_id = $2 AND status = 'active'
+         RETURNING id`,
+        [req.auth.organizationId, id]
+      );
+      const updated = await client.query(
+        `UPDATE customers SET status = 'paused', updated_at = now()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [id, req.auth.organizationId]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "customer",
+        entityId: id,
+        action: "pause",
+        before: apiRow(before),
+        after: {
+          ...apiRow(updated.rows[0]),
+          pausedRecurringServices: plans.rowCount,
+          cancelledBookings: bookingIds.length
+        }
+      });
+      return {
+        customer: updated.rows[0],
+        recurringCount: plans.rowCount,
+        bookingCount: bookingIds.length
+      };
+    });
+    data(res, {
+      customer: apiRow(result.customer),
+      pausedRecurringServices: result.recurringCount,
+      cancelledBookings: result.bookingCount
+    });
+  }));
+
+  router.post("/customers/:id/resume", route(async (req, res) => {
+    const id = idFrom(req);
+    validate(z.object({}).strict(), req.body || {});
+    const customer = await transaction(pool, async client => {
+      const before = await requireOwned(
+        client, "customers", id, req.auth.organizationId, "Customer"
+      );
+      if (!["paused", "inactive"].includes(before.status)) {
+        throw new HttpError(409, "invalid_state", "Only a paused or inactive customer can be resumed");
+      }
+      const updated = await client.query(
+        `UPDATE customers SET status = 'active', updated_at = now()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [id, req.auth.organizationId]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "customer",
+        entityId: id,
+        action: "resume",
+        before: apiRow(before),
+        after: apiRow(updated.rows[0])
+      });
+      return updated.rows[0];
+    });
+    data(res, { customer: apiRow(customer) });
   }));
 }
 

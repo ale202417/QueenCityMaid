@@ -46,6 +46,7 @@ export function authenticate(pool) {
 
       const result = await pool.query(
         `SELECT u.id, u.organization_id AS "organizationId", u.email, u.name, u.role,
+                u.must_change_password AS "mustChangePassword",
                 o.name AS "organizationName", s.id AS "sessionId"
          FROM sessions s
          JOIN users u ON u.id = s.user_id
@@ -62,6 +63,17 @@ export function authenticate(pool) {
       next(error);
     }
   };
+}
+
+export function requirePasswordChange(req, res, next) {
+  if (req.auth?.mustChangePassword) {
+    return next(new HttpError(
+      403,
+      "password_change_required",
+      "Change the temporary password before accessing business data"
+    ));
+  }
+  next();
 }
 
 export function requireRole(...roles) {

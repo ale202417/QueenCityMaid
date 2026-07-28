@@ -1207,6 +1207,27 @@ textarea:hover {
   gap: 7px;
 }
 
+.route-publish-bar {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-bottom: 0;
+  background: #f8faf8;
+}
+
+.route-publish-bar > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+}
+
 .schedule-workspace {
   min-height: 420px;
 }
@@ -1404,8 +1425,16 @@ textarea:hover {
   grid-template-columns: minmax(140px, 1.1fr) minmax(150px, 1.2fr) minmax(125px, 1fr) 100px 80px 105px minmax(110px, 0.8fr);
 }
 
+.recurring-plan-table .data-row {
+  grid-template-columns: minmax(145px, 1.1fr) minmax(170px, 1.3fr) minmax(130px, 1fr) 130px 80px minmax(130px, 0.9fr);
+}
+
 .service-history-table .data-row {
-  grid-template-columns: 105px minmax(170px, 1.3fr) minmax(120px, 1fr) 110px minmax(170px, 1.2fr) 100px;
+  grid-template-columns: 105px minmax(150px, 1.2fr) minmax(120px, 1fr) 100px minmax(150px, 1.1fr) 90px 100px;
+}
+
+.job-issue-table .data-row {
+  grid-template-columns: minmax(150px, 1.1fr) 95px minmax(190px, 1.5fr) 120px 80px 80px;
 }
 
 .history-toolbar .form-field {
@@ -1434,6 +1463,10 @@ textarea:hover {
   grid-template-columns: 110px 120px minmax(230px, 2fr) 130px 85px 60px;
 }
 
+.inbound-message-table .data-row {
+  grid-template-columns: minmax(160px, 1fr) minmax(260px, 1.8fr) 140px 110px;
+}
+
 .labor-table .data-row {
   grid-template-columns: minmax(180px, 1fr) 140px;
 }
@@ -1442,12 +1475,67 @@ textarea:hover {
   grid-template-columns: minmax(150px, 1.2fr) 100px 125px minmax(150px, 1fr) 105px 90px;
 }
 
+.quote-table .data-row {
+  grid-template-columns: minmax(150px, 1.1fr) minmax(180px, 1.3fr) 120px 100px 100px 80px;
+}
+
+.quote-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.quote-summary > div {
+  display: grid;
+  gap: 4px;
+}
+
+.quote-summary span {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.quote-item-form,
+.quote-decision-form {
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+
 .ledger-table .data-row {
   grid-template-columns: 100px minmax(190px, 1.6fr) 120px 90px 90px 100px;
 }
 
 .account-table .data-row {
   grid-template-columns: minmax(180px, 1.5fr) 90px 90px 110px minmax(150px, 1fr);
+}
+
+.service-type-table .data-row {
+  grid-template-columns: minmax(180px, 1.4fr) 110px 100px 90px minmax(150px, 1fr);
+}
+
+.audit-table .data-row {
+  grid-template-columns: 150px 120px minmax(180px, 1.2fr) 120px minmax(130px, 0.8fr);
+}
+
+.audit-table pre {
+  max-width: 100%;
+  max-height: 240px;
+  margin: 8px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.audit-table summary {
+  color: var(--text-link);
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.audit-toolbar input {
+  min-width: 140px;
 }
 
 .overdue-text {
@@ -1610,6 +1698,36 @@ textarea:hover {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
+}
+
+.individual-date-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 10px;
+}
+
+.individual-date-picker .compact-button {
+  min-height: 42px;
+}
+
+.selected-date-list {
+  display: grid;
+  gap: 8px;
+}
+
+.selected-date-list > div {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #f8faf8;
+  font-size: 0.78rem;
+  font-weight: 700;
 }
 
 .form-field {
@@ -1897,16 +2015,19 @@ textarea:hover {
 }
 
 .daily-ledger-table .data-row {
-  grid-template-columns: 100px minmax(220px, 1.7fr) minmax(150px, 1fr) 130px minmax(165px, auto);
+  grid-template-columns: 100px minmax(220px, 1.7fr) minmax(150px, 1fr) 130px 90px minmax(165px, auto);
 }
 
 .payment-record-table .data-row {
-  grid-template-columns: 105px minmax(170px, 1.1fr) minmax(200px, 1.5fr) 110px 110px;
+  grid-template-columns: 105px minmax(150px, 1.1fr) minmax(170px, 1.3fr) 100px 110px 90px;
 }
 
-.account-credit-table .data-row,
-.expense-record-table .data-row {
+.account-credit-table .data-row {
   grid-template-columns: 120px 130px minmax(220px, 1fr) 120px;
+}
+
+.expense-record-table .data-row {
+  grid-template-columns: 105px 110px minmax(180px, 1fr) 90px 90px 100px;
 }
 
 .payment-overview-table .data-row {
@@ -2424,7 +2545,9 @@ textarea:hover {
   }
 
   .other-services-table .data-row,
-  .service-history-table .data-row {
+  .recurring-plan-table .data-row,
+  .service-history-table .data-row,
+  .job-issue-table .data-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
@@ -2597,15 +2720,21 @@ textarea:hover {
 
 @media (max-width: 520px) {
   .payment-tabs .segmented-control,
-  .report-tabs .segmented-control {
+  .report-tabs .segmented-control,
+  .settings-tabs .segmented-control {
     display: grid;
     width: 100%;
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .payment-tabs .segmented-control button,
-  .report-tabs .segmented-control button {
+  .report-tabs .segmented-control button,
+  .settings-tabs .segmented-control button {
     min-width: 0;
+  }
+
+  .settings-tabs .segmented-control {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .comparison-toolbar fieldset {

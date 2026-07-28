@@ -8,12 +8,17 @@ import {
   createSession,
   destroySession,
   recordAudit,
+  requirePasswordChange,
   requireRole
 } from "./auth.js";
 import { createAccountRouter } from "./accounts.js";
 import { withTransaction } from "./db.js";
 import { hashPassword, verifyPassword } from "./passwords.js";
-import { createCommunicationRouter } from "./communications.js";
+import {
+  createCommunicationRouter,
+  createSmsSender,
+  createTwilioWebhookRouter
+} from "./communications.js";
 import { HttpError, asyncRoute, data, errorHandler, notFound, validate } from "./http.js";
 import { createImportRouter } from "./imports.js";
 import { createDispatchRouter } from "./dispatch.js";
@@ -29,7 +34,10 @@ const loginSchema = z.object({
 }).strict();
 
 const auditQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(100).default(50)
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  entityType: z.string().trim().min(1).max(100).optional(),
+  entityId: z.string().uuid().optional(),
+  action: z.string().trim().min(1).max(100).optional()
 }).strict();
 const LOGIN_ATTEMPT_LIMIT = 10;
 const LOGIN_ATTEMPT_WINDOW_MS = 15 * 60 * 1000;
@@ -47,6 +55,7 @@ function publicUser(auth) {
     email: auth.email,
     name: auth.name,
     role: auth.role,
+    mustChangePassword: Boolean(auth.mustChangePassword),
     organization: {
       id: auth.organizationId,
       name: auth.organizationName
@@ -110,7 +119,13 @@ function enforceSameOrigin(req, res, next) {
   next(new HttpError(403, "origin_not_allowed", "Cross-origin request rejected"));
 }
 
-export function createApp({ pool, secureCookies, staticDir } = {}) {
+export function createApp({
+  pool,
+  secureCookies,
+  staticDir,
+  smsSender = createSmsSender(),
+  twilioWebhookOptions = {}
+} = {}) {
   if (!pool) throw new Error("pool is required");
 
   const app = express();
@@ -145,6 +160,10 @@ export function createApp({ pool, secureCookies, staticDir } = {}) {
     await pool.query("SELECT 1");
     data(res, { status: "ok" });
   }));
+  app.use(
+    "/api/webhooks/twilio",
+    createTwilioWebhookRouter({ pool, ...twilioWebhookOptions })
+  );
 
   app.post("/api/auth/login", asyncRoute(async (req, res) => {
     const input = validate(loginSchema, req.body);
@@ -154,7 +173,9 @@ export function createApp({ pool, secureCookies, staticDir } = {}) {
     }
     const result = await pool.query(
       `SELECT u.id, u.organization_id AS "organizationId", u.email, u.name, u.role,
-              u.password_hash AS "passwordHash", o.name AS "organizationName"
+              u.password_hash AS "passwordHash",
+              u.must_change_password AS "mustChangePassword",
+              o.name AS "organizationName"
        FROM users u
        JOIN organizations o ON o.id = u.organization_id
        WHERE lower(u.email) = lower($1) AND u.active = true
@@ -210,7 +231,9 @@ export function createApp({ pool, secureCookies, staticDir } = {}) {
     const passwordHash = await hashPassword(input.newPassword);
     await withTransaction(pool, async (client) => {
       await client.query(
-        "UPDATE users SET password_hash = $2, updated_at = now() WHERE id = $1",
+        `UPDATE users
+         SET password_hash = $2, must_change_password = false, updated_at = now()
+         WHERE id = $1`,
         [req.auth.id, passwordHash]
       );
       await client.query(
@@ -227,28 +250,45 @@ export function createApp({ pool, secureCookies, staticDir } = {}) {
   app.get(
     "/api/audit-events",
     sessionAuth,
+    requirePasswordChange,
     requireRole("manager"),
     asyncRoute(async (req, res) => {
-      const { limit } = validate(auditQuerySchema, req.query);
+      const input = validate(auditQuerySchema, req.query);
+      const values = [req.auth.organizationId];
+      const where = ["ae.organization_id = $1"];
+      for (const [key, column] of [
+        ["entityType", "ae.entity_type"],
+        ["entityId", "ae.entity_id"],
+        ["action", "ae.action"]
+      ]) {
+        if (!input[key]) continue;
+        values.push(input[key]);
+        where.push(`${column} = $${values.length}`);
+      }
+      values.push(input.limit);
       const result = await pool.query(
-        `SELECT id, actor_user_id AS "actorUserId", entity_type AS "entityType",
-                entity_id AS "entityId", action, before_data AS "before",
-                after_data AS "after", reason, created_at AS "createdAt"
-         FROM audit_events
-         WHERE organization_id = $1
-         ORDER BY created_at DESC
-         LIMIT $2`,
-        [req.auth.organizationId, limit]
+        `SELECT ae.id, ae.actor_user_id AS "actorUserId", u.name AS "actorName",
+                ae.entity_type AS "entityType", ae.entity_id AS "entityId",
+                ae.action, ae.before_data AS "before", ae.after_data AS "after",
+                ae.reason, ae.created_at AS "createdAt"
+         FROM audit_events ae
+         LEFT JOIN users u
+           ON u.id = ae.actor_user_id AND u.organization_id = ae.organization_id
+         WHERE ${where.join(" AND ")}
+         ORDER BY ae.created_at DESC
+         LIMIT $${values.length}`,
+        values
       );
       data(res, { events: result.rows });
     })
   );
 
   app.use("/api", sessionAuth);
+  app.use("/api", requirePasswordChange);
   app.use("/api", createScheduleRouter({ pool }));
   app.use("/api", createDispatchRouter({ pool }));
   app.use("/api", createResourceRouter({ pool }));
-  app.use("/api", createCommunicationRouter({ pool }));
+  app.use("/api", createCommunicationRouter({ pool, sender: smsSender }));
   app.use("/api", createReportingRouter({ pool }));
   app.use("/api", createAccountRouter({ pool }));
   app.use("/api", createFinanceRouter({ pool }));

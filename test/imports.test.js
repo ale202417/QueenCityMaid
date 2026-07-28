@@ -60,7 +60,10 @@ describe("onboarding imports", () => {
     assert.equal(created.body.data.import.created, 1);
     assert.equal(created.body.data.import.propertiesCreated, 1);
     const updated = await request("/api/imports/customers", {
-      rows: [{ ...row, name: "Jordan E. Ellis" }]
+      rows: [{
+        name: "Jordan E. Ellis",
+        phone: row.phone
+      }]
     });
     assert.equal(updated.body.data.import.updated, 1);
     const customer = await pool.query(
@@ -87,11 +90,25 @@ describe("onboarding imports", () => {
       }]
     });
     assert.equal(result.response.status, 201);
+    const updated = await request("/api/imports/employees", {
+      rows: [{
+        firstName: "Angela",
+        lastName: "Brooks",
+        phone: "7045552000",
+        hourlyRateCents: 2050
+      }]
+    });
+    assert.equal(updated.body.data.import.updated, 1);
     const count = await pool.query(
-      "SELECT COUNT(*)::integer AS count FROM employees WHERE organization_id = $1",
+      `SELECT hourly_rate_cents AS rate, can_drive AS "canDrive",
+              experience_level AS experience
+       FROM employees WHERE organization_id = $1`,
       [organizationId]
     );
-    assert.equal(Number(count.rows[0].count), 1);
+    assert.equal(count.rowCount, 1);
+    assert.equal(count.rows[0].rate, 2050);
+    assert.equal(count.rows[0].canDrive, true);
+    assert.equal(count.rows[0].experience, "senior");
     const invalid = await request("/api/imports/customers", {
       rows: [{ name: "Missing phone", type: "residential" }]
     });

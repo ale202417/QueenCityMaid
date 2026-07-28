@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { Router } from "express";
+import { Router, urlencoded } from "express";
 import twilio from "twilio";
 import { z } from "zod";
 import { recordAudit, requireRole } from "./auth.js";
@@ -274,7 +274,7 @@ export function createTwilioWebhookRouter({
   organizationId = process.env.TWILIO_ORGANIZATION_ID
 } = {}) {
   const router = Router();
-  router.use(Router.urlencoded({ extended: false, limit: "100kb" }));
+  router.use(urlencoded({ extended: false, limit: "100kb" }));
   router.use((req, res, next) => {
     if (!accountSid || !authToken || !fromNumber) {
       return next(new HttpError(503, "sms_not_configured", "Twilio webhooks are not configured"));
@@ -486,18 +486,22 @@ export function createCommunicationRouter({ pool, sender = createSmsSender() }) 
     let status = "";
     if (input.status) {
       values.push(input.status);
-      status = ` AND status = $${values.length}`;
+      status = ` AND n.status = $${values.length}`;
     }
     values.push(input.limit);
     const result = await pool.query(
-      `SELECT id, customer_id AS "customerId", booking_id AS "bookingId", type,
-              destination, body, status, due_at AS "dueAt", sent_at AS "sentAt",
-              delivered_at AS "deliveredAt", provider_message_id AS "providerMessageId",
-              provider_status AS "providerStatus", failure_reason AS "failureReason",
-              created_at AS "createdAt"
-       FROM notifications
-       WHERE organization_id = $1${status}
-       ORDER BY due_at DESC
+      `SELECT n.id, n.customer_id AS "customerId", c.name AS "customerName",
+              n.booking_id AS "bookingId", n.type, n.destination, n.body, n.status,
+              n.due_at AS "dueAt", n.sent_at AS "sentAt",
+              n.delivered_at AS "deliveredAt",
+              n.provider_message_id AS "providerMessageId",
+              n.provider_status AS "providerStatus",
+              n.failure_reason AS "failureReason", n.created_at AS "createdAt"
+       FROM notifications n
+       LEFT JOIN customers c
+         ON c.id = n.customer_id AND c.organization_id = n.organization_id
+       WHERE n.organization_id = $1${status}
+       ORDER BY n.due_at DESC
        LIMIT $${values.length}`,
       values
     );
@@ -532,14 +536,80 @@ export function createCommunicationRouter({ pool, sender = createSmsSender() }) 
 
   router.post("/notifications/:id/cancel", asyncRoute(async (req, res) => {
     const id = validate(uuid, req.params.id);
-    const result = await pool.query(
-      `UPDATE notifications SET status = 'cancelled'
-       WHERE id = $1 AND organization_id = $2 AND status = 'queued'
-       RETURNING id, status`,
-      [id, req.auth.organizationId]
-    );
-    if (!result.rowCount) throw new HttpError(404, "not_found", "Queued notification not found");
-    data(res, { notification: result.rows[0] });
+    const notification = await withTransaction(pool, async (client) => {
+      const before = await client.query(
+        "SELECT * FROM notifications WHERE id = $1 AND organization_id = $2",
+        [id, req.auth.organizationId]
+      );
+      if (!before.rowCount || before.rows[0].status !== "queued") {
+        throw new HttpError(404, "not_found", "Queued notification not found");
+      }
+      const result = await client.query(
+        `UPDATE notifications SET status = 'cancelled'
+         WHERE id = $1 AND organization_id = $2
+         RETURNING id, status`,
+        [id, req.auth.organizationId]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "notification",
+        entityId: id,
+        action: "cancel",
+        before: before.rows[0],
+        after: result.rows[0]
+      });
+      return result.rows[0];
+    });
+    data(res, { notification });
+  }));
+
+  router.post("/notifications/:id/retry", asyncRoute(async (req, res) => {
+    const id = validate(uuid, req.params.id);
+    validate(z.object({}).strict(), req.body || {});
+    const notification = await withTransaction(pool, async (client) => {
+      const before = await client.query(
+        "SELECT * FROM notifications WHERE id = $1 AND organization_id = $2",
+        [id, req.auth.organizationId]
+      );
+      if (!before.rowCount) throw new HttpError(404, "not_found", "Notification not found");
+      if (before.rows[0].status !== "failed") {
+        throw new HttpError(409, "invalid_state", "Only a failed message can be retried");
+      }
+      const existingRetry = await client.query(
+        `SELECT 1 FROM notifications
+         WHERE organization_id = $1 AND idempotency_key LIKE $2
+         LIMIT 1`,
+        [req.auth.organizationId, `notification-retry:${id}:%`]
+      );
+      if (existingRetry.rowCount) {
+        throw new HttpError(409, "retry_already_queued", "This failed message already has a retry");
+      }
+      const retryId = crypto.randomUUID();
+      const result = await client.query(
+        `INSERT INTO notifications
+         (id, organization_id, customer_id, employee_id, booking_id, type,
+          channel, destination, body, status, idempotency_key, due_at)
+         SELECT $3, organization_id, customer_id, employee_id, booking_id, type,
+                channel, destination, body, 'queued', $4, now()
+         FROM notifications
+         WHERE id = $1 AND organization_id = $2
+         RETURNING id, status, due_at AS "dueAt"`,
+        [
+          id,
+          req.auth.organizationId,
+          retryId,
+          `notification-retry:${id}:${retryId}`
+        ]
+      );
+      await recordAudit(client, req.auth, {
+        entityType: "notification",
+        entityId: retryId,
+        action: "retry",
+        before: before.rows[0],
+        after: { ...result.rows[0], retriedNotificationId: id }
+      });
+      return result.rows[0];
+    });
+    data(res, { notification });
   }));
 
   return router;

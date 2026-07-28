@@ -5,17 +5,17 @@ import { recordAudit, requireRole } from "./auth.js";
 import { HttpError, asyncRoute, data, validate } from "./http.js";
 
 const customerRow = z.object({
-  type: z.enum(["residential", "commercial", "realtor"]).default("residential"),
+  type: z.enum(["residential", "commercial", "realtor"]).optional(),
   name: z.string().trim().min(1).max(200),
   email: z.string().trim().email().max(254).nullable().optional(),
   phone: z.string().trim().min(7).max(30),
-  status: z.enum(["lead", "active", "paused", "inactive"]).default("active"),
+  status: z.enum(["lead", "active", "paused", "inactive"]).optional(),
   serviceFrequency: z.enum(["weekly", "biweekly", "monthly", "other"]).nullable().optional(),
   paymentMethod: z.enum(["zelle", "venmo", "paypal", "cash", "check", "other"]).nullable().optional(),
   addressLine1: z.string().trim().min(1).max(200).optional(),
   addressLine2: z.string().trim().max(200).optional(),
   city: z.string().trim().min(1).max(100).optional(),
-  state: z.string().trim().length(2).default("NC"),
+  state: z.string().trim().length(2).optional(),
   postalCode: z.string().trim().min(3).max(20).optional(),
   squareFeet: z.number().int().positive().nullable().optional(),
   pets: z.string().trim().max(1000).optional(),
@@ -32,9 +32,9 @@ const employeeRow = z.object({
   phone: z.string().trim().min(7).max(30),
   hireDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable().optional(),
   hourlyRateCents: z.number().int().min(0).max(1_000_000),
-  experienceLevel: z.string().trim().min(1).max(50).default("standard"),
-  canDrive: z.boolean().default(false),
-  active: z.boolean().default(true)
+  experienceLevel: z.string().trim().min(1).max(50).optional(),
+  canDrive: z.boolean().optional(),
+  active: z.boolean().optional()
 }).strict();
 
 const customersSchema = z.object({
@@ -77,15 +77,25 @@ export function createImportRouter({ pool }) {
         let customerId;
         if (existing.rowCount) {
           customerId = existing.rows[0].id;
+          const fields = {
+            name: row.name,
+            ...(Object.hasOwn(row, "type") && { type: row.type }),
+            ...(Object.hasOwn(row, "email") && { email: row.email ?? null }),
+            ...(Object.hasOwn(row, "status") && { status: row.status }),
+            ...(Object.hasOwn(row, "serviceFrequency")
+              && { service_frequency: row.serviceFrequency ?? null }),
+            ...(Object.hasOwn(row, "paymentMethod")
+              && { payment_method: row.paymentMethod ?? null })
+          };
+          const entries = Object.entries(fields);
           await client.query(
-            `UPDATE customers SET type = $3, name = $4, email = $5, status = $6,
-                    service_frequency = $7, payment_method = $8,
-                    updated_at = now()
+            `UPDATE customers SET
+             ${entries.map(([column], index) => `${column} = $${index + 3}`).join(", ")},
+             updated_at = now()
              WHERE id = $1 AND organization_id = $2`,
             [
-              customerId, req.auth.organizationId, row.type, row.name,
-              row.email || null, row.status, row.serviceFrequency ?? null,
-              row.paymentMethod ?? null
+              customerId, req.auth.organizationId,
+              ...entries.map(([, value]) => value)
             ]
           );
           updated += 1;
@@ -97,8 +107,8 @@ export function createImportRouter({ pool }) {
               service_frequency, payment_method)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
             [
-              customerId, req.auth.organizationId, row.type, row.name,
-              row.email || null, row.phone, row.status,
+              customerId, req.auth.organizationId, row.type || "residential", row.name,
+              row.email || null, row.phone, row.status || "active",
               row.serviceFrequency ?? null, row.paymentMethod ?? null
             ]
           );
@@ -119,7 +129,7 @@ export function createImportRouter({ pool }) {
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
               [
                 crypto.randomUUID(), req.auth.organizationId, customerId, row.addressLine1,
-                row.addressLine2 || "", row.city, row.state, row.postalCode,
+                row.addressLine2 || "", row.city, row.state || "NC", row.postalCode,
                 row.squareFeet ?? null, row.pets || "", row.accessInstructions || "",
                 row.serviceNotes || ""
               ]
@@ -148,15 +158,25 @@ export function createImportRouter({ pool }) {
           [req.auth.organizationId, row.phone]
         );
         if (existing.rowCount) {
+          const fields = {
+            first_name: row.firstName,
+            last_name: row.lastName,
+            ...(Object.hasOwn(row, "hireDate") && { hire_date: row.hireDate ?? null }),
+            hourly_rate_cents: row.hourlyRateCents,
+            ...(Object.hasOwn(row, "experienceLevel")
+              && { experience_level: row.experienceLevel }),
+            ...(Object.hasOwn(row, "canDrive") && { can_drive: row.canDrive }),
+            ...(Object.hasOwn(row, "active") && { active: row.active })
+          };
+          const entries = Object.entries(fields);
           await client.query(
-            `UPDATE employees SET first_name = $3, last_name = $4, hire_date = $5,
-                    hourly_rate_cents = $6, experience_level = $7, can_drive = $8,
-                    active = $9, updated_at = now()
+            `UPDATE employees SET
+             ${entries.map(([column], index) => `${column} = $${index + 3}`).join(", ")},
+             updated_at = now()
              WHERE id = $1 AND organization_id = $2`,
             [
-              existing.rows[0].id, req.auth.organizationId, row.firstName, row.lastName,
-              row.hireDate || null, row.hourlyRateCents, row.experienceLevel,
-              row.canDrive, row.active
+              existing.rows[0].id, req.auth.organizationId,
+              ...entries.map(([, value]) => value)
             ]
           );
           updated += 1;
@@ -169,7 +189,7 @@ export function createImportRouter({ pool }) {
             [
               crypto.randomUUID(), req.auth.organizationId, row.firstName, row.lastName,
               row.phone, row.hireDate || null, row.hourlyRateCents,
-              row.experienceLevel, row.canDrive, row.active
+              row.experienceLevel || "standard", row.canDrive ?? false, row.active ?? true
             ]
           );
           created += 1;

@@ -140,17 +140,57 @@ describe("sales API", () => {
       method: "PATCH",
       body: {
         status: "awaiting_information",
-        followUpDueAt: "2026-07-27T14:00:00.000Z"
+        followUpDueAt: "2026-07-27T14:00:00.000Z",
+        expectedUpdatedAt: leadDetail.body.data.lead.updatedAt
       }
     });
     assert.equal(leadUpdated.response.status, 200);
     assert.equal(leadUpdated.body.data.lead.status, "awaiting_information");
+    const staleLead = await request(`/api/leads/${leadId}`, {
+      method: "PATCH",
+      body: {
+        message: "This stale browser should not overwrite newer data",
+        expectedUpdatedAt: leadDetail.body.data.lead.updatedAt
+      }
+    });
+    assert.equal(staleLead.response.status, 409);
+    assert.equal(staleLead.body.error.code, "stale_record");
     const leads = await request("/api/leads?status=awaiting_information");
     assert.equal(leads.response.status, 200);
     assert.equal(leads.body.data.leads.length, 1);
     assert.equal(leads.body.data.pagination.total, 1);
     const searchedLeads = await request("/api/leads?q=Alice");
     assert.equal(searchedLeads.body.data.leads[0].id, leadId);
+    const shortcutConversion = await request(`/api/leads/${leadId}`, {
+      method: "PATCH",
+      body: { status: "converted" }
+    });
+    assert.equal(shortcutConversion.response.status, 409);
+    assert.equal(shortcutConversion.body.error.code, "lifecycle_action_required");
+    const closedLead = await request(`/api/leads/${leadId}/close`, {
+      method: "POST",
+      body: { status: "unresponsive", reason: "No reply after follow-up" }
+    });
+    assert.equal(closedLead.response.status, 200);
+    assert.equal(closedLead.body.data.lead.status, "unresponsive");
+    const reopenedLead = await request(`/api/leads/${leadId}/reopen`, {
+      method: "POST",
+      body: {}
+    });
+    assert.equal(reopenedLead.response.status, 200);
+    assert.equal(reopenedLead.body.data.lead.status, "contacted");
+    const convertedLead = await request(`/api/leads/${leadId}/convert`, {
+      method: "POST",
+      body: {
+        customerType: "residential",
+        serviceFrequency: "biweekly",
+        paymentMethod: "zelle",
+        internalNotes: "Converted from Nextdoor"
+      }
+    });
+    assert.equal(convertedLead.response.status, 200, JSON.stringify(convertedLead.body));
+    assert.equal(convertedLead.body.data.lead.status, "converted");
+    assert.equal(convertedLead.body.data.customer.id, ids.customerA);
 
     const quoteCreated = await request("/api/quotes", {
       method: "POST",
@@ -262,6 +302,22 @@ describe("sales API", () => {
     });
     assert.equal(recurringPaused.response.status, 200);
     assert.equal(recurringPaused.body.data.recurringService.status, "paused");
+    const recurringListed = await request("/api/recurring-services?status=paused");
+    assert.equal(recurringListed.response.status, 200);
+    assert.equal(recurringListed.body.data.recurringServices.length, 1);
+    assert.equal(recurringListed.body.data.recurringServices[0].customerName, "Alice Client");
+    assert.equal(recurringListed.body.data.pagination.total, 1);
+    const recurringResumed = await request(`/api/recurring-services/${recurringId}`, {
+      method: "PATCH",
+      body: {
+        status: "active",
+        startsOn: "2026-09-02",
+        restartOn: "2026-09-02",
+        recurrenceRule: { type: "weekly", intervalWeeks: 2 }
+      }
+    });
+    assert.equal(recurringResumed.response.status, 200);
+    assert.equal(recurringResumed.body.data.recurringService.status, "active");
     const recurringReanchored = await request(`/api/recurring-services/${recurringId}`, {
       method: "PATCH",
       body: {
@@ -275,9 +331,6 @@ describe("sales API", () => {
       "2026-09-02"
     );
     assert.equal(recurringReanchored.body.data.nextDates[0], "2026-09-02");
-    const recurringListed = await request("/api/recurring-services?status=paused");
-    assert.equal(recurringListed.response.status, 200);
-    assert.equal(recurringListed.body.data.recurringServices.length, 1);
 
     const bookingCreated = await request("/api/bookings", {
       method: "POST",
@@ -415,6 +468,19 @@ describe("sales API", () => {
     });
     assert.equal(mixedUpdate.response.status, 400);
     assert.equal(mixedUpdate.body.error.code, "validation_error");
+
+    const paused = await request(`/api/recurring-services/${recurringId}`, {
+      method: "PATCH",
+      body: { status: "paused" }
+    });
+    assert.equal(paused.response.status, 200, JSON.stringify(paused.body));
+    const pausedBookings = await pool.query(
+      "SELECT id, status FROM bookings WHERE recurring_service_id = $1 ORDER BY scheduled_start",
+      [recurringId]
+    );
+    assert.equal(pausedBookings.rows[0].status, "cancelled");
+    assert.equal(pausedBookings.rows[1].status, "cancelled");
+    assert.equal(pausedBookings.rows[2].status, "completed");
   });
 
   it("rejects invalid payloads and invalid state transitions", async () => {

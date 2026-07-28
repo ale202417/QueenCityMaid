@@ -65,10 +65,21 @@ describe("user account administration", () => {
     });
     assert.equal(created.response.status, 201);
     assert.equal(created.body.data.user.employeeId, ids.employee);
+    assert.equal(created.body.data.user.mustChangePassword, true);
     const employee = await pool.query("SELECT user_id FROM employees WHERE id = $1", [ids.employee]);
     assert.equal(employee.rows[0].user_id, created.body.data.user.id);
     const list = await request("/api/users");
     assert.equal(list.body.data.users.length, 2);
+    const duplicateCase = await request("/api/users", {
+      method: "POST",
+      body: JSON.stringify({
+        email: "MANAGER@TEST.LOCAL",
+        name: "Duplicate Manager",
+        role: "manager",
+        password: "temporary-pass-123"
+      })
+    });
+    assert.equal(duplicateCase.response.status, 409);
   });
 
   it("validates cleaner links, prevents self-deactivation, and isolates users", async () => {

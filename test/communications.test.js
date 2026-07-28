@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import express from "express";
 import { afterEach, describe, it } from "node:test";
+import twilio from "twilio";
 import {
   createCommunicationRouter,
+  createTwilioWebhookRouter,
   sendDueNotifications
 } from "../src/server/communications.js";
 import { errorHandler } from "../src/server/http.js";
@@ -48,6 +50,12 @@ async function fixture() {
     [ids.booking, ids.organization, ids.customer, ids.property, ids.service]
   );
   const sent = [];
+  const twilioOptions = {
+    accountSid: `AC${"1".repeat(32)}`,
+    authToken: "test-auth-token",
+    fromNumber: "+17045552000",
+    organizationId: ids.organization
+  };
   const sender = {
     configured: true,
     async send(message) { sent.push(message); }
@@ -58,6 +66,10 @@ async function fixture() {
     req.auth = { id: ids.manager, organizationId: ids.organization, role: "manager" };
     next();
   });
+  app.use(
+    "/api/webhooks/twilio",
+    createTwilioWebhookRouter({ pool, ...twilioOptions })
+  );
   app.use("/api", createCommunicationRouter({ pool, sender }));
   app.use(errorHandler);
   const server = app.listen(0);
@@ -71,7 +83,7 @@ async function fixture() {
     });
     return { response, body: await response.json() };
   };
-  return { pool, ids, request, sent, sender };
+  return { pool, ids, request, sent, sender, base, twilioOptions };
 }
 
 describe("customer communications", () => {
@@ -155,6 +167,7 @@ describe("customer communications", () => {
     const listed = await request("/api/notifications");
     assert.equal(listed.response.status, 200);
     assert.equal(listed.body.data.notifications.length, 1);
+    assert.equal(listed.body.data.notifications[0].customerName, "Jordan Ellis");
     assert.match(listed.body.data.notifications[0].body, /\$220\.00/);
   });
 
@@ -176,5 +189,103 @@ describe("customer communications", () => {
     );
     assert.equal(notification.rows[0].status, "failed");
     assert.match(notification.rows[0].failure_reason, /provider down/);
+  });
+
+  it("queues direct messages and retries failures without erasing the original", async () => {
+    const { pool, ids, request } = await fixture();
+    await request(`/api/customers/${ids.customer}/text-consent`, {
+      method: "POST",
+      body: JSON.stringify({ status: "granted", source: "Customer text reply" })
+    });
+    const direct = await request(`/api/customers/${ids.customer}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ body: "Your manager confirmed tomorrow's arrival time." })
+    });
+    assert.equal(direct.response.status, 201, JSON.stringify(direct.body));
+    const notificationId = direct.body.data.notification.id;
+    await pool.query(
+      `UPDATE notifications
+       SET status = 'failed', failure_reason = 'provider rejected message',
+           send_attempted_at = now()
+       WHERE id = $1`,
+      [notificationId]
+    );
+
+    const retried = await request(`/api/notifications/${notificationId}/retry`, {
+      method: "POST",
+      body: "{}"
+    });
+    assert.equal(retried.response.status, 200, JSON.stringify(retried.body));
+    assert.equal(retried.body.data.notification.status, "queued");
+    assert.notEqual(retried.body.data.notification.id, notificationId);
+    const records = await pool.query(
+      `SELECT id, status, failure_reason
+       FROM notifications
+       WHERE organization_id = $1
+       ORDER BY created_at, id`,
+      [ids.organization]
+    );
+    assert.equal(records.rowCount, 2);
+    assert.equal(records.rows.find((row) => row.id === notificationId).status, "failed");
+    assert.match(
+      records.rows.find((row) => row.id === notificationId).failure_reason,
+      /provider rejected/
+    );
+    assert.equal(
+      records.rows.find((row) => row.id !== notificationId).status,
+      "queued"
+    );
+    const duplicateRetry = await request(`/api/notifications/${notificationId}/retry`, {
+      method: "POST",
+      body: "{}"
+    });
+    assert.equal(duplicateRetry.response.status, 409);
+  });
+
+  it("verifies and records Twilio inbound webhooks", async () => {
+    const { pool, ids, base, twilioOptions } = await fixture();
+    const url = `${base}/api/webhooks/twilio/sms`;
+    const form = {
+      AccountSid: twilioOptions.accountSid,
+      MessageSid: `SM${"2".repeat(32)}`,
+      From: "+17045552000",
+      To: twilioOptions.fromNumber,
+      Body: "Please pause next week's cleaning",
+      OptOutType: "HELP"
+    };
+    const invalid = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-twilio-signature": "invalid"
+      },
+      body: new URLSearchParams(form)
+    });
+    assert.equal(invalid.status, 403);
+
+    const signature = twilio.getExpectedTwilioSignature(
+      twilioOptions.authToken,
+      url,
+      form
+    );
+    const accepted = await fetch(url, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-twilio-signature": signature
+      },
+      body: new URLSearchParams(form)
+    });
+    assert.equal(accepted.status, 200);
+    assert.match(await accepted.text(), /<Response>/);
+    const inbound = await pool.query(
+      `SELECT customer_id, body
+       FROM inbound_messages
+       WHERE provider_message_id = $1`,
+      [form.MessageSid]
+    );
+    assert.equal(inbound.rowCount, 1);
+    assert.equal(inbound.rows[0].customer_id, ids.customer);
+    assert.equal(inbound.rows[0].body, form.Body);
   });
 });

@@ -11,6 +11,8 @@ export function ProductPage({ path, user }) {
       return <DashboardPage />;
     case "/leads":
       return <LeadsPage />;
+    case "/quotes":
+      return <QuotesPage />;
     case "/customers":
       return <CustomersPage />;
     case "/schedule":
@@ -362,6 +364,41 @@ function LeadsPage() {
     offset: page * PAGE_SIZE
   }), [status, debouncedSearch, page]);
   const leads = resource.data?.leads || [];
+  const closedStatuses = ["declined", "unresponsive", "duplicate", "not_serviceable"];
+
+  async function exportLeads() {
+    try {
+      const rows = await loadAllRows("/leads", {
+        status,
+        q: debouncedSearch
+      }, "leads");
+      downloadTableCsv({
+        filename: "queen-city-maid-leads.csv",
+        columns: [
+          "Name", "Phone", "Email", "Source", "Status", "Received",
+          "Response due", "First responded", "Follow-up due", "Closed reason"
+        ],
+        rows: rows.map((lead) => [
+          lead.name, lead.phone, lead.email, lead.source, lead.status,
+          lead.receivedAt, lead.responseDueAt, lead.firstRespondedAt,
+          lead.followUpDueAt, lead.closedReason
+        ])
+      });
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    }
+  }
+
+  async function reopenLead(lead) {
+    if (!window.confirm(`Reopen ${lead.name}?`)) return;
+    try {
+      await api.post(`/leads/${lead.id}/reopen`);
+      setNotice({ message: "Lead reopened." });
+      resource.reload();
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    }
+  }
 
   return (
     <>
@@ -370,6 +407,9 @@ function LeadsPage() {
         title="Leads"
         description="New inquiries, response deadlines, follow-up, and outcomes."
       >
+        <button className="secondary-button" type="button" onClick={exportLeads}>
+          Export filtered CSV
+        </button>
         <button className="primary-button inline-button" type="button" onClick={() => setModal({ type: "lead" })}>
           Add lead
         </button>
@@ -412,7 +452,7 @@ function LeadsPage() {
               return (
                 <article className="data-row" key={lead.id}>
                   <div data-label="Lead"><strong>{lead.name}</strong><small>{lead.phone || lead.email}</small></div>
-                  <div data-label="Source">{lead.source}</div>
+                  <div data-label="Source"><span>{lead.source}</span><small>{lead.ownerName || "Unassigned"}</small></div>
                   <div data-label="Received">{dateTime(lead.receivedAt)}</div>
                   <div data-label="Response">
                     {lead.firstRespondedAt ? dateTime(lead.firstRespondedAt) : <span className={overdue ? "overdue-text" : ""}>Due {dateTime(lead.responseDueAt)}</span>}
@@ -421,6 +461,15 @@ function LeadsPage() {
                   <div className="row-actions" data-label="Actions">
                     <button className="text-button" type="button" onClick={() => setModal({ type: "activity", lead })}>Activity</button>
                     <button className="text-button" type="button" onClick={() => setModal({ type: "lead", item: lead })}>Edit</button>
+                    {!closedStatuses.includes(lead.status) && lead.status !== "converted" && (
+                      <>
+                        <button className="text-button" type="button" onClick={() => setModal({ type: "convert", lead })}>Convert</button>
+                        <button className="text-button danger-text" type="button" onClick={() => setModal({ type: "close", lead })}>Close lead</button>
+                      </>
+                    )}
+                    {closedStatuses.includes(lead.status) && (
+                      <button className="text-button" type="button" onClick={() => reopenLead(lead)}>Reopen</button>
+                    )}
                   </div>
                 </article>
               );
@@ -455,6 +504,36 @@ function LeadsPage() {
           }}
         />
       )}
+      {modal?.type === "close" && (
+        <Modal title={`Close lead - ${modal.lead.name}`} onClose={() => setModal(null)}>
+          <CloseLeadForm
+            lead={modal.lead}
+            onCancel={() => setModal(null)}
+            onSaved={() => {
+              setModal(null);
+              setNotice({ message: "Lead closed." });
+              resource.reload();
+            }}
+          />
+        </Modal>
+      )}
+      {modal?.type === "convert" && (
+        <Modal
+          title={`Convert lead - ${modal.lead.name}`}
+          description="Create or link the customer record and optionally add the first property."
+          onClose={() => setModal(null)}
+        >
+          <ConvertLeadForm
+            lead={modal.lead}
+            onCancel={() => setModal(null)}
+            onSaved={() => {
+              setModal(null);
+              setNotice({ message: "Lead converted to an active customer." });
+              resource.reload();
+            }}
+          />
+        </Modal>
+      )}
     </>
   );
 }
@@ -463,9 +542,14 @@ const leadStatuses = [
   "new", "contacted", "awaiting_information", "quote_ready", "converted",
   "declined", "unresponsive", "duplicate", "not_serviceable"
 ];
+const editableLeadStatuses = [
+  "new", "contacted", "awaiting_information", "quote_ready"
+];
 
 function LeadForm({ lead, onCancel, onSaved }) {
+  const owners = useLoad(() => api.get("/users"), []);
   const [form, setForm] = useState({
+    ownerUserId: lead?.ownerUserId || "",
     source: lead?.source || "Phone",
     name: lead?.name || "",
     phone: lead?.phone || "",
@@ -477,13 +561,12 @@ function LeadForm({ lead, onCancel, onSaved }) {
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const closed = ["declined", "unresponsive", "duplicate", "not_serviceable"].includes(form.status);
-
   async function submit(event) {
     event.preventDefault();
     setSaving(true);
     setError("");
     const common = {
+      ...(form.ownerUserId ? { ownerUserId: form.ownerUserId } : {}),
       source: form.source,
       name: form.name,
       phone: form.phone.trim() || null,
@@ -492,9 +575,9 @@ function LeadForm({ lead, onCancel, onSaved }) {
     };
     const payload = lead ? {
       ...common,
-      status: form.status,
+      ...(form.status !== lead.status ? { status: form.status } : {}),
       followUpDueAt: form.followUpDueAt ? new Date(form.followUpDueAt).toISOString() : null,
-      closedReason: closed ? form.closedReason : null
+      expectedUpdatedAt: lead.updatedAt
     } : common;
     try {
       if (lead) await api.patch(`/leads/${lead.id}`, payload);
@@ -512,13 +595,26 @@ function LeadForm({ lead, onCancel, onSaved }) {
       <div className="form-grid">
         <Field label="Name"><input required maxLength="200" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} /></Field>
         <Field label="Source"><input required maxLength="100" value={form.source} onChange={(event) => setForm({ ...form, source: event.target.value })} /></Field>
+        <Field label="Owner">
+          <select value={form.ownerUserId} onChange={(event) => setForm({ ...form, ownerUserId: event.target.value })}>
+            {!lead && <option value="">Current manager</option>}
+            {(owners.data?.users || [])
+              .filter((user) => user.role === "manager" && user.active)
+              .map((user) => <option key={user.id} value={user.id}>{user.name}</option>)}
+          </select>
+        </Field>
         <Field label="Phone"><input maxLength="30" inputMode="tel" value={form.phone} onChange={(event) => setForm({ ...form, phone: event.target.value })} /></Field>
         <Field label="Email"><input maxLength="254" type="email" value={form.email} onChange={(event) => setForm({ ...form, email: event.target.value })} /></Field>
         {lead && (
           <>
             <Field label="Status">
               <select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>
-                {leadStatuses.map((value) => <option key={value} value={value}>{capitalize(value.replaceAll("_", " "))}</option>)}
+                {!editableLeadStatuses.includes(form.status) && (
+                  <option value={form.status} disabled>
+                    {capitalize(form.status.replaceAll("_", " "))}
+                  </option>
+                )}
+                {editableLeadStatuses.map((value) => <option key={value} value={value}>{capitalize(value.replaceAll("_", " "))}</option>)}
               </select>
             </Field>
             <Field label="Follow-up due">
@@ -528,12 +624,158 @@ function LeadForm({ lead, onCancel, onSaved }) {
         )}
       </div>
       <Field label="Inquiry"><textarea rows="4" maxLength="5000" value={form.message} onChange={(event) => setForm({ ...form, message: event.target.value })} /></Field>
-      {lead && closed && (
-        <Field label="Closed reason"><textarea required rows="3" maxLength="1000" value={form.closedReason} onChange={(event) => setForm({ ...form, closedReason: event.target.value })} /></Field>
-      )}
       {!form.phone.trim() && !form.email.trim() && <p className="form-error">Enter a phone number or email address.</p>}
       {error && <p className="form-error" role="alert">{error}</p>}
       <FormActions saving={saving} disabled={!form.phone.trim() && !form.email.trim()} onCancel={onCancel} submitLabel={lead ? "Save changes" : "Add lead"} />
+    </form>
+  );
+}
+
+function CloseLeadForm({ lead, onCancel, onSaved }) {
+  const [status, setStatus] = useState("declined");
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api.post(`/leads/${lead.id}/close`, { status, reason });
+      onSaved();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <Field label="Outcome">
+        <select value={status} onChange={(event) => setStatus(event.target.value)}>
+          <option value="declined">Declined</option>
+          <option value="unresponsive">Unresponsive</option>
+          <option value="duplicate">Duplicate</option>
+          <option value="not_serviceable">Not serviceable</option>
+        </select>
+      </Field>
+      <Field label="Reason">
+        <textarea required maxLength="1000" rows="3" value={reason} onChange={(event) => setReason(event.target.value)} />
+      </Field>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions danger saving={saving} onCancel={onCancel} submitLabel="Close lead" />
+    </form>
+  );
+}
+
+function ConvertLeadForm({ lead, onCancel, onSaved }) {
+  const [form, setForm] = useState({
+    customerType: "residential",
+    serviceFrequency: "",
+    paymentMethod: "",
+    internalNotes: "",
+    includeProperty: false,
+    addressLine1: "",
+    addressLine2: "",
+    city: "Charlotte",
+    state: "NC",
+    postalCode: "",
+    squareFeet: "",
+    condition: "",
+    pets: "",
+    serviceNotes: ""
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    const payload = {
+      customerType: form.customerType,
+      serviceFrequency: form.serviceFrequency || null,
+      paymentMethod: form.paymentMethod || null,
+      internalNotes: form.internalNotes,
+      property: form.includeProperty ? {
+        addressLine1: form.addressLine1,
+        addressLine2: form.addressLine2,
+        city: form.city,
+        state: form.state,
+        postalCode: form.postalCode,
+        squareFeet: form.squareFeet ? Number(form.squareFeet) : null,
+        condition: form.condition || null,
+        pets: form.pets,
+        serviceNotes: form.serviceNotes
+      } : null
+    };
+    try {
+      await api.post(`/leads/${lead.id}/convert`, payload);
+      onSaved();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <div className="form-grid">
+        <Field label="Customer type">
+          <select value={form.customerType} onChange={(event) => setForm({ ...form, customerType: event.target.value })}>
+            <option value="residential">Residential</option>
+            <option value="commercial">Commercial</option>
+            <option value="realtor">Realtor</option>
+          </select>
+        </Field>
+        <Field label="Service frequency">
+          <select value={form.serviceFrequency} onChange={(event) => setForm({ ...form, serviceFrequency: event.target.value })}>
+            <option value="">Not set</option>
+            <option value="weekly">Weekly</option><option value="biweekly">Biweekly</option>
+            <option value="monthly">Monthly</option><option value="other">Other</option>
+          </select>
+        </Field>
+        <Field label="Payment method">
+          <select value={form.paymentMethod} onChange={(event) => setForm({ ...form, paymentMethod: event.target.value })}>
+            <option value="">Not set</option>
+            <option value="zelle">Zelle</option><option value="venmo">Venmo</option>
+            <option value="paypal">PayPal</option><option value="cash">Cash</option>
+            <option value="check">Check</option><option value="other">Other</option>
+          </select>
+        </Field>
+      </div>
+      <Field label="Internal notes">
+        <textarea maxLength="5000" rows="3" value={form.internalNotes} onChange={(event) => setForm({ ...form, internalNotes: event.target.value })} />
+      </Field>
+      <label className="checkbox-field">
+        <input type="checkbox" checked={form.includeProperty} onChange={(event) => setForm({ ...form, includeProperty: event.target.checked })} />
+        Add the first property
+      </label>
+      {form.includeProperty && (
+        <>
+          <div className="form-grid">
+            <Field label="Address"><input required maxLength="200" value={form.addressLine1} onChange={(event) => setForm({ ...form, addressLine1: event.target.value })} /></Field>
+            <Field label="Address line 2"><input maxLength="200" value={form.addressLine2} onChange={(event) => setForm({ ...form, addressLine2: event.target.value })} /></Field>
+            <Field label="City"><input required maxLength="100" value={form.city} onChange={(event) => setForm({ ...form, city: event.target.value })} /></Field>
+            <Field label="State"><input required maxLength="2" value={form.state} onChange={(event) => setForm({ ...form, state: event.target.value.toUpperCase() })} /></Field>
+            <Field label="Postal code"><input required maxLength="20" value={form.postalCode} onChange={(event) => setForm({ ...form, postalCode: event.target.value })} /></Field>
+            <Field label="Square feet"><input min="1" type="number" value={form.squareFeet} onChange={(event) => setForm({ ...form, squareFeet: event.target.value })} /></Field>
+            <Field label="Condition"><input maxLength="100" value={form.condition} onChange={(event) => setForm({ ...form, condition: event.target.value })} /></Field>
+            <Field label="Pets"><input maxLength="1000" value={form.pets} onChange={(event) => setForm({ ...form, pets: event.target.value })} /></Field>
+          </div>
+          <Field label="Property notes">
+            <textarea maxLength="5000" rows="3" value={form.serviceNotes} onChange={(event) => setForm({ ...form, serviceNotes: event.target.value })} />
+          </Field>
+        </>
+      )}
+      {!lead.phone && (
+        <p className="form-error">Add a phone number to this lead before creating a new customer.</p>
+      )}
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions saving={saving} disabled={!lead.phone} onCancel={onCancel} submitLabel="Convert lead" />
     </form>
   );
 }
@@ -594,6 +836,391 @@ function LeadActivityManager({ lead, onClose, onSaved }) {
   );
 }
 
+function QuotesPage() {
+  const [status, setStatus] = useState("");
+  const [modal, setModal] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const resource = useLoad(
+    () => api.get("/quotes", { status, limit: 100 }),
+    [status]
+  );
+  const quotes = resource.data?.quotes || [];
+
+  function changed(message) {
+    setModal(null);
+    setNotice({ message });
+    resource.reload();
+  }
+
+  return (
+    <>
+      <PageHeader
+        eyebrow="Sales"
+        title="Quotes"
+        description="Pricing prepared for customer review and recorded customer decisions."
+      >
+        <button className="primary-button inline-button" type="button" onClick={() => setModal({ type: "create" })}>
+          Create quote
+        </button>
+      </PageHeader>
+      <Notice notice={notice} onClose={() => setNotice(null)} />
+      <section className="section-block">
+        <div className="toolbar">
+          <select aria-label="Filter quote status" value={status} onChange={(event) => setStatus(event.target.value)}>
+            <option value="">All statuses</option>
+            {["draft", "sent", "approved", "needs_review", "declined", "superseded"].map((value) => (
+              <option key={value} value={value}>{capitalize(value.replaceAll("_", " "))}</option>
+            ))}
+          </select>
+          <button className="secondary-button" type="button" onClick={resource.reload}>Refresh</button>
+        </div>
+        {resource.status === "loading" && <LoadingRows />}
+        {resource.status === "error" && <StatePanel title="Quotes unavailable" message={resource.error} />}
+        {resource.status === "ready" && !quotes.length && (
+          <StatePanel title="No quotes" message="No quotes match this status." />
+        )}
+        {resource.status === "ready" && quotes.length > 0 && (
+          <div className="data-table quote-table">
+            <div className="data-row data-head">
+              <span>Customer</span><span>Property</span><span>Pricing</span>
+              <span>Total</span><span>Status</span><span>Actions</span>
+            </div>
+            {quotes.map((quote) => (
+              <article className="data-row" key={quote.id}>
+                <div data-label="Customer"><strong>{quote.customerName}</strong></div>
+                <div data-label="Property">
+                  <strong>{quote.addressLine1}</strong>
+                  <small>{quote.city}, {quote.postalCode}</small>
+                </div>
+                <div data-label="Pricing">{capitalize(quote.pricingType.replaceAll("_", " "))}</div>
+                <div data-label="Total"><strong>{money(quote.subtotalCents)}</strong></div>
+                <div data-label="Status"><StatusBadge status={quote.status.replaceAll("_", " ")} /></div>
+                <div data-label="Actions">
+                  <button className="text-button" type="button" onClick={() => setModal({ type: "detail", quote })}>
+                    Manage
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        )}
+      </section>
+      {modal?.type === "create" && (
+        <Modal title="Create quote" onClose={() => setModal(null)}>
+          <QuoteForm
+            onCancel={() => setModal(null)}
+            onSaved={() => changed("Quote created.")}
+          />
+        </Modal>
+      )}
+      {modal?.type === "detail" && (
+        <QuoteManager
+          quote={modal.quote}
+          onClose={() => setModal(null)}
+          onChanged={changed}
+        />
+      )}
+    </>
+  );
+}
+
+function QuoteForm({ onCancel, onSaved }) {
+  const [customerSearch, setCustomerSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(customerSearch);
+  const customers = useLoad(
+    () => api.list("customers", { q: debouncedSearch, limit: 20 }),
+    [debouncedSearch]
+  );
+  const serviceTypes = useLoad(
+    () => api.list("service-types", { active: true, limit: 100 }),
+    []
+  );
+  const [form, setForm] = useState({
+    customerId: "",
+    propertyId: "",
+    pricingType: "flat",
+    hourlyRate: "99",
+    estimatedHours: "",
+    serviceTypeId: "",
+    description: "",
+    amount: "",
+    notes: ""
+  });
+  const properties = useLoad(
+    () => form.customerId
+      ? api.list("properties", { customerId: form.customerId, active: true, limit: 100 })
+      : Promise.resolve({ properties: [] }),
+    [form.customerId]
+  );
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const flat = form.pricingType === "flat";
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api.post("/quotes", {
+        customerId: form.customerId,
+        propertyId: form.propertyId,
+        pricingType: form.pricingType,
+        hourlyRateCents: form.pricingType === "hourly_team" ? cents(form.hourlyRate) : null,
+        estimatedHours: form.pricingType === "hourly_team" ? Number(form.estimatedHours) : null,
+        notes: form.notes,
+        items: flat ? [{
+          serviceTypeId: form.serviceTypeId || null,
+          description: form.description,
+          quantity: 1,
+          unitPriceCents: cents(form.amount),
+          sortOrder: 0
+        }] : []
+      });
+      onSaved();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <Field label="Find customer">
+        <input type="search" value={customerSearch} onChange={(event) => setCustomerSearch(event.target.value)} />
+      </Field>
+      <div className="form-grid">
+        <Field label="Customer">
+          <select required value={form.customerId} onChange={(event) => setForm({ ...form, customerId: event.target.value, propertyId: "" })}>
+            <option value="">Select customer</option>
+            {(customers.data?.customers || []).map((customer) => (
+              <option key={customer.id} value={customer.id}>{customer.name} - {customer.phone}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Property">
+          <select required value={form.propertyId} onChange={(event) => setForm({ ...form, propertyId: event.target.value })}>
+            <option value="">Select property</option>
+            {(properties.data?.properties || []).map((property) => (
+              <option key={property.id} value={property.id}>{property.addressLine1}, {property.city}</option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Pricing">
+          <select value={form.pricingType} onChange={(event) => setForm({ ...form, pricingType: event.target.value })}>
+            <option value="flat">Flat quote</option>
+            <option value="hourly_team">Hourly team</option>
+            <option value="inspection">Inspection required</option>
+          </select>
+        </Field>
+      </div>
+      {flat && (
+        <div className="form-grid">
+          <Field label="Service">
+            <select value={form.serviceTypeId} onChange={(event) => {
+              const selected = serviceTypes.data?.serviceTypes?.find((service) => service.id === event.target.value);
+              setForm({
+                ...form,
+                serviceTypeId: event.target.value,
+                description: selected?.name || form.description
+              });
+            }}>
+              <option value="">No service type</option>
+              {(serviceTypes.data?.serviceTypes || []).map((service) => (
+                <option key={service.id} value={service.id}>{service.name}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Description">
+            <input required maxLength="500" value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
+          </Field>
+          <Field label="Quoted amount">
+            <input required min="0" step="0.01" type="number" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} />
+          </Field>
+        </div>
+      )}
+      {form.pricingType === "hourly_team" && (
+        <div className="form-grid">
+          <Field label="Hourly rate">
+            <input required min="0" step="0.01" type="number" value={form.hourlyRate} onChange={(event) => setForm({ ...form, hourlyRate: event.target.value })} />
+          </Field>
+          <Field label="Estimated hours">
+            <input required min="0.25" step="0.25" type="number" value={form.estimatedHours} onChange={(event) => setForm({ ...form, estimatedHours: event.target.value })} />
+          </Field>
+        </div>
+      )}
+      <Field label="Quote notes">
+        <textarea maxLength="5000" rows="4" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} />
+      </Field>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions
+        saving={saving}
+        disabled={!form.customerId || !form.propertyId}
+        onCancel={onCancel}
+        submitLabel="Create quote"
+      />
+    </form>
+  );
+}
+
+function QuoteManager({ quote, onClose, onChanged }) {
+  const resource = useLoad(() => api.get(`/quotes/${quote.id}`), [quote.id]);
+  const serviceTypes = useLoad(
+    () => api.list("service-types", { active: true, limit: 100 }),
+    []
+  );
+  const [item, setItem] = useState({ serviceTypeId: "", description: "", amount: "" });
+  const [decision, setDecision] = useState(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const current = resource.data?.quote;
+
+  async function addItem(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api.post(`/quotes/${quote.id}/items`, {
+        serviceTypeId: item.serviceTypeId || null,
+        description: item.description,
+        quantity: 1,
+        unitPriceCents: cents(item.amount),
+        sortOrder: resource.data?.items?.length || 0
+      });
+      setItem({ serviceTypeId: "", description: "", amount: "" });
+      resource.reload();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function removeItem(itemId) {
+    if (!window.confirm("Remove this quote item?")) return;
+    try {
+      await api.remove(`/quotes/${quote.id}/items/${itemId}`);
+      resource.reload();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    }
+  }
+
+  async function markSent() {
+    if (!window.confirm("Mark this quote as sent to the customer?")) return;
+    try {
+      await api.post(`/quotes/${quote.id}/send`);
+      onChanged("Quote marked as sent.");
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    }
+  }
+
+  async function recordDecision(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api.post(`/quotes/${quote.id}/${decision.type}`, {
+        replyText: decision.replyText
+      });
+      onChanged(decision.type === "approve" ? "Quote approved." : "Quote declined.");
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Modal title={`Quote - ${quote.customerName}`} onClose={onClose}>
+      {resource.status === "loading" && <LoadingRows />}
+      {resource.status === "error" && <StatePanel title="Quote unavailable" message={resource.error} />}
+      {resource.status === "ready" && current && (
+        <>
+          <div className="quote-summary">
+            <div><span>Status</span><StatusBadge status={current.status.replaceAll("_", " ")} /></div>
+            <div><span>Property</span><strong>{current.addressLine1}, {current.city}</strong></div>
+            <div><span>Total</span><strong>{money(current.subtotalCents)}</strong></div>
+          </div>
+          <div className="stack-list compact-list">
+            {!resource.data.items.length && (
+              <StatePanel title="No line items" message="Add pricing after the property inspection." />
+            )}
+            {resource.data.items.map((quoteItem) => (
+              <article className="stack-row" key={quoteItem.id}>
+                <div>
+                  <strong>{quoteItem.description}</strong>
+                  <p>{quoteItem.serviceName || "Custom item"} · {money(quoteItem.lineTotalCents)}</p>
+                </div>
+                {!["declined", "superseded"].includes(current.status) && (
+                  <button className="text-button danger-text" type="button" onClick={() => removeItem(quoteItem.id)}>
+                    Remove
+                  </button>
+                )}
+              </article>
+            ))}
+          </div>
+          {!["declined", "superseded"].includes(current.status) && (
+            <form className="modal-form quote-item-form" onSubmit={addItem}>
+              <div className="form-grid">
+                <Field label="Service">
+                  <select value={item.serviceTypeId} onChange={(event) => {
+                    const selected = serviceTypes.data?.serviceTypes?.find((service) => service.id === event.target.value);
+                    setItem({
+                      ...item,
+                      serviceTypeId: event.target.value,
+                      description: selected?.name || item.description
+                    });
+                  }}>
+                    <option value="">Custom item</option>
+                    {(serviceTypes.data?.serviceTypes || []).map((service) => (
+                      <option key={service.id} value={service.id}>{service.name}</option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Item description">
+                  <input required maxLength="500" value={item.description} onChange={(event) => setItem({ ...item, description: event.target.value })} />
+                </Field>
+                <Field label="Item amount">
+                  <input required min="0" step="0.01" type="number" value={item.amount} onChange={(event) => setItem({ ...item, amount: event.target.value })} />
+                </Field>
+              </div>
+              <button className="secondary-button" disabled={saving} type="submit">Add item</button>
+            </form>
+          )}
+          <div className="form-actions">
+            <button className="secondary-button" type="button" onClick={onClose}>Close</button>
+            {["draft", "needs_review"].includes(current.status) && (
+              <button className="primary-button" type="button" onClick={markSent}>Mark sent</button>
+            )}
+            {current.status === "sent" && (
+              <>
+                <button className="secondary-button" type="button" onClick={() => setDecision({ type: "decline", replyText: "" })}>Record decline</button>
+                <button className="primary-button" type="button" onClick={() => setDecision({ type: "approve", replyText: "" })}>Record approval</button>
+              </>
+            )}
+          </div>
+          {decision && (
+            <form className="modal-form quote-decision-form" onSubmit={recordDecision}>
+              <Field label="Customer reply">
+                <textarea required maxLength="5000" rows="3" value={decision.replyText} onChange={(event) => setDecision({ ...decision, replyText: event.target.value })} />
+              </Field>
+              <FormActions
+                danger={decision.type === "decline"}
+                saving={saving}
+                onCancel={() => setDecision(null)}
+                submitLabel={decision.type === "approve" ? "Approve quote" : "Decline quote"}
+              />
+            </form>
+          )}
+          {error && <p className="form-error" role="alert">{error}</p>}
+        </>
+      )}
+    </Modal>
+  );
+}
+
 function CustomersPage() {
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("");
@@ -609,10 +1236,64 @@ function CustomersPage() {
   }), [status, debouncedSearch, page]);
   const customers = resource.data?.customers || [];
 
+  async function exportCustomers() {
+    try {
+      const rows = await loadAllRows("/customers", {
+        status,
+        q: debouncedSearch
+      }, "customers");
+      downloadTableCsv({
+        filename: "queen-city-maid-customers.csv",
+        columns: [
+          "Name", "Type", "Phone", "Email", "Status", "Frequency",
+          "Payment method", "Preferred channel", "Properties", "Internal notes"
+        ],
+        rows: rows.map((customer) => [
+          customer.name, customer.type, customer.phone, customer.email,
+          customer.status, customer.serviceFrequency, customer.paymentMethod,
+          customer.preferredChannel, customer.propertyCount, customer.internalNotes
+        ])
+      });
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    }
+  }
+
   async function paymentReminder(customer) {
     try {
       await api.post(`/customers/${customer.id}/payment-reminder`);
       setNotice({ message: `Payment reminder queued for ${customer.name}.` });
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    }
+  }
+
+  async function reactivateCustomer(customer) {
+    if (!window.confirm(
+      `Reactivate ${customer.name}? Cancelled visits and ended recurring services will stay closed.`
+    )) return;
+    try {
+      await api.post(`/customers/${customer.id}/reactivate`);
+      setNotice({ message: `${customer.name} was reactivated.` });
+      resource.reload();
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    }
+  }
+
+  async function customerLifecycle(customer, action) {
+    const prompt = action === "pause"
+      ? `Pause ${customer.name}? Future unstarted visits and reminders will be cancelled.`
+      : `Resume ${customer.name}? Service plans will stay paused until a manager restarts them.`;
+    if (!window.confirm(prompt)) return;
+    try {
+      await api.post(`/customers/${customer.id}/${action}`);
+      setNotice({
+        message: action === "pause"
+          ? `${customer.name} was paused and future visits were stopped.`
+          : `${customer.name} was resumed. Restart a service plan when they are ready.`
+      });
+      resource.reload();
     } catch (error) {
       setNotice({ type: "error", message: errorMessage(error) });
     }
@@ -625,6 +1306,9 @@ function CustomersPage() {
         title="Customers"
         description="Contacts, service frequency, payment preferences, properties, and communication consent."
       >
+        <button className="secondary-button" type="button" onClick={exportCustomers}>
+          Export filtered CSV
+        </button>
         <button className="primary-button inline-button" type="button" onClick={() => setModal({ type: "customer" })}>
           Add customer
         </button>
@@ -704,8 +1388,17 @@ function CustomersPage() {
                     <button className="text-button" type="button" onClick={() => setModal({ type: "customer", item: customer })}>Edit</button>
                     <button className="text-button" type="button" onClick={() => setModal({ type: "consent", customer })}>Text consent</button>
                     <button className="text-button" type="button" onClick={() => paymentReminder(customer)}>Payment reminder</button>
+                    {customer.status === "active" && (
+                      <button className="text-button" type="button" onClick={() => customerLifecycle(customer, "pause")}>Pause services</button>
+                    )}
+                    {["paused", "inactive"].includes(customer.status) && (
+                      <button className="text-button" type="button" onClick={() => customerLifecycle(customer, "resume")}>Resume customer</button>
+                    )}
                     {customer.status !== "cancelled" && (
                       <button className="text-button danger-text" type="button" onClick={() => setModal({ type: "cancel-customer", customer })}>Cancel customer</button>
+                    )}
+                    {customer.status === "cancelled" && (
+                      <button className="text-button" type="button" onClick={() => reactivateCustomer(customer)}>Reactivate customer</button>
                     )}
                   </div>
                 </article>
@@ -806,11 +1499,13 @@ function CustomerForm({ customer, onCancel, onSaved }) {
     event.preventDefault();
     setSaving(true);
     setError("");
+    const { status, ...details } = form;
     const payload = {
-      ...form,
+      ...details,
       email: form.email.trim() || null,
       serviceFrequency: form.serviceFrequency || null,
-      paymentMethod: form.paymentMethod || null
+      paymentMethod: form.paymentMethod || null,
+      ...(!customer ? { status } : {})
     };
     try {
       const result = customer
@@ -834,15 +1529,14 @@ function CustomerForm({ customer, onCancel, onSaved }) {
             <option value="realtor">Realtor</option>
           </select>
         </Field>
-        <Field label="Status">
-          <select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>
-            <option value="active">Active</option>
-            <option value="paused">Paused</option>
-            <option value="lead">Lead</option>
-            <option value="inactive">Inactive</option>
-            {form.status === "cancelled" && <option value="cancelled" disabled>Cancelled</option>}
-          </select>
-        </Field>
+        {!customer && (
+          <Field label="Status">
+            <select value={form.status} onChange={(event) => setForm({ ...form, status: event.target.value })}>
+              <option value="active">Active</option>
+              <option value="lead">Lead</option>
+            </select>
+          </Field>
+        )}
         <Field label="Name">
           <input required maxLength="200" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
         </Field>
@@ -1177,6 +1871,8 @@ function PaymentsPage() {
   const [tab, setTab] = useState("ledger");
   const [date, setDate] = useState(localDate());
   const [decisionModal, setDecisionModal] = useState(null);
+  const [tipModal, setTipModal] = useState(null);
+  const [correctionModal, setCorrectionModal] = useState(null);
   const [notice, setNotice] = useState(null);
   const ledger = useLoad(() => api.get("/payments/daily", { date }), [date]);
   const records = useLoad(
@@ -1202,6 +1898,20 @@ function PaymentsPage() {
     setNotice({ message });
     ledger.reload();
     if (["payments", "credits"].includes(tab)) records.reload();
+  }
+
+  function finishCorrection(message) {
+    setCorrectionModal(null);
+    setNotice({ message });
+    ledger.reload();
+    records.reload();
+    overview.reload();
+  }
+
+  function finishTip(message) {
+    setTipModal(null);
+    setNotice({ message });
+    ledger.reload();
   }
 
   return (
@@ -1258,7 +1968,7 @@ function PaymentsPage() {
           {ledger.status === "ready" && services.length > 0 && (
             <div className="data-table daily-ledger-table">
               <div className="data-row data-head">
-                <span>Date</span><span>Client information</span><span>Service</span><span>Amount charged</span><span>Paid</span>
+                <span>Date</span><span>Client information</span><span>Service</span><span>Amount charged</span><span>Tip</span><span>Paid</span>
               </div>
               {services.map((service) => (
                 <article className="data-row" key={service.bookingId}>
@@ -1275,6 +1985,12 @@ function PaymentsPage() {
                   <div data-label="Amount charged">
                     <strong>{money(service.amountCents ?? service.flatAmountCents)}</strong>
                     {service.billingType === "hourly" && <small>{service.hourlyMinutes ? hours(service.hourlyMinutes) : "Hours required"}</small>}
+                  </div>
+                  <div data-label="Tip">
+                    <strong>{service.tipAmountCents == null ? "-" : money(service.tipAmountCents)}</strong>
+                    <button className="text-button" type="button" onClick={() => setTipModal(service)}>
+                      {service.tipId ? "Edit tip" : "Record tip"}
+                    </button>
                   </div>
                   <div className="payment-decision-cell" data-label="Paid">
                     {service.decision ? (
@@ -1303,7 +2019,10 @@ function PaymentsPage() {
           {records.status === "error" && <StatePanel title="Payment records unavailable" message={records.error} />}
           {records.status === "ready" && paymentRecords.length === 0 && <StatePanel title="No confirmed payments" message="Approved daily ledger entries will be stored here." />}
           {records.status === "ready" && paymentRecords.length > 0 && (
-            <PaymentRecordTable rows={paymentRecords} />
+            <PaymentRecordTable
+              rows={paymentRecords}
+              onReverse={(record) => setCorrectionModal({ type: "reverse", record })}
+            />
           )}
         </section>
       )}
@@ -1315,7 +2034,13 @@ function PaymentsPage() {
             {records.status === "loading" && <LoadingRows />}
             {records.status === "error" && <StatePanel title="Credit records unavailable" message={records.error} />}
             {records.status === "ready" && declinedRecords.length === 0 && <StatePanel title="No outstanding services" message="Services marked unpaid will appear here." />}
-            {records.status === "ready" && declinedRecords.length > 0 && <PaymentRecordTable rows={declinedRecords} outstanding />}
+            {records.status === "ready" && declinedRecords.length > 0 && (
+              <PaymentRecordTable
+                rows={declinedRecords}
+                outstanding
+                onWaive={(record) => setCorrectionModal({ type: "waive", record })}
+              />
+            )}
           </section>
           <section className="section-block">
             <SectionHeader eyebrow="Customer accounts" title="Positive credits" count={records.status === "ready" ? creditRecords.length : undefined} />
@@ -1381,26 +2106,148 @@ function PaymentsPage() {
           />
         </Modal>
       )}
+      {tipModal && (
+        <Modal
+          title={tipModal.tipId ? "Edit service tip" : "Record service tip"}
+          description={`${tipModal.customerName} - ${tipModal.serviceName || "Cleaning service"}`}
+          onClose={() => setTipModal(null)}
+        >
+          <ServiceTipForm
+            service={tipModal}
+            onCancel={() => setTipModal(null)}
+            onSaved={() => finishTip(tipModal.tipId ? "Service tip updated." : "Service tip recorded and split across the assigned cleaners.")}
+          />
+        </Modal>
+      )}
+      {correctionModal?.type === "reverse" && (
+        <Modal title="Reverse payment" description={`${correctionModal.record.customerName} - ${money(correctionModal.record.amountCents)}`} onClose={() => setCorrectionModal(null)}>
+          <FinancialCorrectionForm
+            path={`/payments/${correctionModal.record.id}/reverse`}
+            onCancel={() => setCorrectionModal(null)}
+            onSaved={() => finishCorrection("Payment reversed and customer balance updated.")}
+            submitLabel="Reverse payment"
+          />
+        </Modal>
+      )}
+      {correctionModal?.type === "waive" && (
+        <Modal title="Waive charge" description={`${correctionModal.record.customerName} - ${money(correctionModal.record.amountCents)}`} onClose={() => setCorrectionModal(null)}>
+          <FinancialCorrectionForm
+            path={`/charges/${correctionModal.record.id}/waive`}
+            onCancel={() => setCorrectionModal(null)}
+            onSaved={() => finishCorrection("Charge waived and customer balance updated.")}
+            submitLabel="Waive charge"
+          />
+        </Modal>
+      )}
     </>
   );
 }
 
-function PaymentRecordTable({ rows, outstanding = false }) {
+function PaymentRecordTable({ rows, outstanding = false, onReverse, onWaive }) {
   return (
     <div className="data-table payment-record-table">
-      <div className="data-row data-head"><span>Date</span><span>Customer</span><span>Service</span><span>Amount</span><span>{outstanding ? "Status" : "Method"}</span></div>
+      <div className="data-row data-head"><span>Date</span><span>Customer</span><span>Service</span><span>Amount</span><span>{outstanding ? "Status" : "Method"}</span><span>Actions</span></div>
       {rows.map((row, index) => (
         <article className="data-row" key={row.id || row.bookingId || `${row.customerId}-${row.date}-${index}`}>
-          <div data-label="Date">{shortDate(row.date || row.chargedOn)}</div>
+          <div data-label="Date">{shortDate(row.date || row.serviceDate || row.chargedOn || row.paidAt)}</div>
           <div data-label="Customer"><strong>{row.customerName}</strong><small>{row.customerPhone || row.phone}</small></div>
           <div data-label="Service"><strong>{row.serviceName || row.description}</strong><small>{row.address}</small></div>
           <div data-label="Amount"><strong>{money(row.amountCents)}</strong></div>
           <div data-label={outstanding ? "Status" : "Method"}>
-            {outstanding ? <StatusBadge status="past due" /> : paymentMethodLabel(row.paymentMethod || row.method)}
+            {outstanding
+              ? <StatusBadge status="past due" />
+              : row.status === "reversed"
+                ? <StatusBadge status="reversed" />
+                : paymentMethodLabel(row.paymentMethod || row.method)}
+            {row.reversalReason && <small>{row.reversalReason}</small>}
+          </div>
+          <div className="row-actions" data-label="Actions">
+            {outstanding && onWaive && (
+              <button className="text-button danger-text" type="button" onClick={() => onWaive(row)}>Waive</button>
+            )}
+            {!outstanding && row.status !== "reversed" && onReverse && (
+              <button className="text-button danger-text" type="button" onClick={() => onReverse(row)}>Reverse</button>
+            )}
+            {!outstanding && row.status === "reversed" && <span className="muted">Corrected</span>}
           </div>
         </article>
       ))}
     </div>
+  );
+}
+
+function FinancialCorrectionForm({ path, onCancel, onSaved, submitLabel }) {
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api.post(path, { reason });
+      onSaved();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <Field label="Reason">
+        <textarea required maxLength="1000" rows="3" value={reason} onChange={(event) => setReason(event.target.value)} />
+      </Field>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions danger saving={saving} onCancel={onCancel} submitLabel={submitLabel} />
+    </form>
+  );
+}
+
+function ServiceTipForm({ service, onCancel, onSaved }) {
+  const [amount, setAmount] = useState(
+    service.tipAmountCents == null ? "" : (Number(service.tipAmountCents) / 100).toFixed(2)
+  );
+  const [source, setSource] = useState(service.tipSource || "customer");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const payload = { amountCents: cents(amount), source };
+      if (service.tipId) {
+        await api.patch(`/bookings/${service.bookingId}/tips/${service.tipId}`, payload);
+      } else {
+        await api.post(`/bookings/${service.bookingId}/tips`, payload);
+      }
+      onSaved();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <Field label="Tip amount">
+        <input required min="0.01" step="0.01" type="number" value={amount} onChange={(event) => setAmount(event.target.value)} />
+      </Field>
+      <Field label="Reported by">
+        <select value={source} onChange={(event) => setSource(event.target.value)}>
+          <option value="customer">Customer</option>
+          <option value="employee">Employee</option>
+          <option value="manager">Manager</option>
+        </select>
+      </Field>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions saving={saving} onCancel={onCancel} submitLabel={service.tipId ? "Save tip" : "Record tip"} />
+    </form>
   );
 }
 
@@ -1584,6 +2431,29 @@ function EmployeesPage() {
     pagination: null
   };
 
+  async function exportEmployees() {
+    try {
+      const rows = await loadAllRows("/employees", {
+        q: debouncedEmployeeSearch
+      }, "employees");
+      downloadTableCsv({
+        filename: "queen-city-maid-employees.csv",
+        columns: [
+          "First name", "Last name", "Phone", "Hire date", "Hourly rate",
+          "Experience", "Driver", "Active", "Quality rating"
+        ],
+        rows: rows.map((employee) => [
+          employee.firstName, employee.lastName, employee.phone, employee.hireDate,
+          (Number(employee.hourlyRateCents || 0) / 100).toFixed(2),
+          employee.experienceLevel, employee.canDrive ? "Yes" : "No",
+          employee.active ? "Yes" : "No", employee.qualityRating
+        ])
+      });
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -1591,6 +2461,11 @@ function EmployeesPage() {
         title="Employees"
         description="Cleaner records, regular teams, captains, and availability exceptions."
       >
+        {tab === "employees" && (
+          <button className="secondary-button" type="button" onClick={exportEmployees}>
+            Export filtered CSV
+          </button>
+        )}
         <button
           className="primary-button inline-button"
           type="button"
@@ -1641,7 +2516,11 @@ function EmployeesPage() {
         )}
         {resource.status === "ready" && tab === "employees" && (
           <>
-            <EmployeeList employees={data.employees} onEdit={(item) => setModal({ type: "employee", item })} />
+            <EmployeeList
+              employees={data.employees}
+              onEdit={(item) => setModal({ type: "employee", item })}
+              onFeedback={(item) => setModal({ type: "feedback", item })}
+            />
             <Pagination pagination={data.pagination} onPageChange={setEmployeePage} />
           </>
         )}
@@ -1697,11 +2576,21 @@ function EmployeesPage() {
           onNotice={setNotice}
         />
       )}
+      {modal?.type === "feedback" && (
+        <QualityFeedbackManager
+          employee={modal.item}
+          onClose={() => setModal(null)}
+          onChanged={(message) => {
+            setNotice({ message });
+            resource.reload();
+          }}
+        />
+      )}
     </>
   );
 }
 
-function EmployeeList({ employees, onEdit }) {
+function EmployeeList({ employees, onEdit, onFeedback }) {
   if (!employees.length) return <StatePanel title="No employees" message="Add the first cleaner record." />;
   return (
     <div className="data-table employee-table">
@@ -1713,10 +2602,117 @@ function EmployeeList({ employees, onEdit }) {
           <div data-label="Rate">{money(employee.hourlyRateCents)}/hr</div>
           <div data-label="Driver">{employee.canDrive ? "Yes" : "No"}</div>
           <div data-label="Status"><StatusBadge status={employee.active ? "active" : "inactive"} /></div>
-          <div data-label="Actions"><button className="text-button" type="button" onClick={() => onEdit(employee)}>Edit</button></div>
+          <div className="row-actions" data-label="Actions">
+            <button className="text-button" type="button" onClick={() => onFeedback(employee)}>Feedback</button>
+            <button className="text-button" type="button" onClick={() => onEdit(employee)}>Edit</button>
+          </div>
         </article>
       ))}
     </div>
+  );
+}
+
+function QualityFeedbackManager({ employee, onClose, onChanged }) {
+  const resource = useLoad(() => api.list("quality-feedback", {
+    employeeId: employee.id,
+    limit: 100
+  }), [employee.id]);
+  const [form, setForm] = useState({
+    rating: "5",
+    notes: "",
+    receivedAt: localDate()
+  });
+  const [saving, setSaving] = useState(false);
+  const [deletingId, setDeletingId] = useState("");
+  const [error, setError] = useState("");
+  const feedback = resource.data?.qualityFeedback || [];
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api.create("quality-feedback", {
+        employeeId: employee.id,
+        rating: Number(form.rating),
+        notes: form.notes,
+        receivedAt: form.receivedAt
+      });
+      setForm((current) => ({ ...current, notes: "" }));
+      onChanged("Employee feedback recorded.");
+      resource.reload();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function remove(item) {
+    if (!window.confirm("Delete this feedback entry?")) return;
+    setDeletingId(item.id);
+    setError("");
+    try {
+      await api.remove(`/quality-feedback/${item.id}`);
+      onChanged("Employee feedback deleted.");
+      resource.reload();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setDeletingId("");
+    }
+  }
+
+  return (
+    <Modal title={`${employee.firstName} ${employee.lastName} - Feedback`} onClose={onClose}>
+      {resource.status === "loading" && <LoadingRows />}
+      {resource.status === "error" && <StatePanel title="Feedback unavailable" message={resource.error} />}
+      {resource.status === "ready" && (
+        <>
+          <div className="stack-list compact-list">
+            {!feedback.length && <StatePanel title="No feedback" message="Record the first client or manager rating." />}
+            {feedback.map((item) => (
+              <article className="stack-row" key={item.id}>
+                <div>
+                  <strong>{item.rating} of 5</strong>
+                  <p>{item.notes || "No notes"}</p>
+                  <small>{dateTime(item.receivedAt)}</small>
+                </div>
+                <button
+                  className="text-button danger-text"
+                  disabled={deletingId === item.id}
+                  type="button"
+                  onClick={() => remove(item)}
+                >
+                  {deletingId === item.id ? "Deleting..." : "Delete"}
+                </button>
+              </article>
+            ))}
+          </div>
+          <form className="modal-form" onSubmit={submit}>
+            <div className="form-grid">
+              <Field label="Rating">
+                <select value={form.rating} onChange={(event) => setForm({ ...form, rating: event.target.value })}>
+                  <option value="5">5 - Excellent</option><option value="4">4 - Good</option>
+                  <option value="3">3 - Satisfactory</option><option value="2">2 - Needs improvement</option>
+                  <option value="1">1 - Poor</option>
+                </select>
+              </Field>
+              <Field label="Received at">
+                <input required type="date" value={form.receivedAt} onChange={(event) => setForm({ ...form, receivedAt: event.target.value })} />
+              </Field>
+            </div>
+            <Field label="Feedback notes">
+              <textarea maxLength="2000" rows="3" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} />
+            </Field>
+            {error && <p className="form-error" role="alert">{error}</p>}
+            <button className="primary-button inline-button" disabled={saving} type="submit">
+              {saving ? "Recording..." : "Record feedback"}
+            </button>
+          </form>
+        </>
+      )}
+    </Modal>
   );
 }
 
@@ -2028,6 +3024,8 @@ function SchedulePage() {
   const [teamId, setTeamId] = useState("");
   const [historyFrom, setHistoryFrom] = useState(shiftDate(localDate(), -90));
   const [historyTo, setHistoryTo] = useState(localDate());
+  const [issueStatus, setIssueStatus] = useState("open");
+  const [planStatus, setPlanStatus] = useState("");
   const [revision, setRevision] = useState(0);
   const [modal, setModal] = useState(null);
   const [notice, setNotice] = useState(null);
@@ -2049,12 +3047,18 @@ function SchedulePage() {
     if (tab === "others") {
       return api.get("/schedule-planner/others", { reference });
     }
+    if (tab === "issues") {
+      return api.get("/job-issues", { status: issueStatus, limit: 100 });
+    }
+    if (tab === "plans") {
+      return api.get("/recurring-services", { status: planStatus, limit: 100 });
+    }
     return api.get("/schedule-planner/history", {
       from: historyFrom,
       to: historyTo,
       limit: 300
     });
-  }, [tab, reference, historyFrom, historyTo, revision]);
+  }, [tab, reference, historyFrom, historyTo, issueStatus, planStatus, revision]);
 
   const plan = tab === "A" || tab === "B" ? resource.data : null;
   const selectedDay = plan?.days?.[dayIndex] || plan?.days?.[0];
@@ -2062,9 +3066,11 @@ function SchedulePage() {
   const hasUnassigned = Boolean(selectedDay?.bookings?.some((booking) => !booking.teamId));
 
   useEffect(() => {
-    setDayIndex(0);
+    if (!plan?.days?.length) return;
+    const todayIndex = plan.days.findIndex((day) => day.date === localDate());
+    setDayIndex(todayIndex >= 0 ? todayIndex : 0);
     setTeamId("");
-  }, [tab, reference]);
+  }, [tab, reference, plan?.weekStart, plan?.weekEnd]);
 
   useEffect(() => {
     if (!plan?.teams?.length || teamId) return;
@@ -2077,6 +3083,43 @@ function SchedulePage() {
     setRevision((value) => value + 1);
   }
 
+  async function finalizeRoute(routeId) {
+    try {
+      await api.post(`/routes/${routeId}/finalize`);
+      changed("Crew route finalized and ready for the captain.");
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    }
+  }
+
+  async function unassignBooking(booking) {
+    if (!window.confirm(`Remove ${booking.customerName} from this crew? The visit will stay scheduled.`)) return;
+    try {
+      await api.post(`/schedule-planner/bookings/${booking.id}/move`, {
+        date: booking.serviceDate,
+        startTime: booking.startTime,
+        teamId: null,
+        updateScope: "single"
+      });
+      changed("Visit unassigned and kept on the schedule.");
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    }
+  }
+
+  async function planAction(planItem, action) {
+    const message = action === "paused"
+      ? `Pause ${planItem.customerName}'s ${planItem.serviceName} plan? Future unstarted visits will be cancelled.`
+      : `End ${planItem.customerName}'s ${planItem.serviceName} plan? This cannot be resumed automatically.`;
+    if (!window.confirm(message)) return;
+    try {
+      await api.patch(`/recurring-services/${planItem.id}`, { status: action });
+      changed(action === "paused" ? "Service plan paused." : "Service plan ended.");
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    }
+  }
+
   return (
     <>
       <PageHeader
@@ -2084,7 +3127,7 @@ function SchedulePage() {
         title="Schedule"
         description="Alternating service weeks, crew routes, flexible recurring clients, and service history."
       >
-        {(tab === "A" || tab === "B" || tab === "others") && (
+        {(tab === "A" || tab === "B" || tab === "others" || tab === "plans") && (
           <button
             className="secondary-button"
             disabled={referenceData.status !== "ready"}
@@ -2116,7 +3159,9 @@ function SchedulePage() {
           ["A", "Schedule A"],
           ["B", "Schedule B"],
           ["others", "Others"],
-          ["history", "Past services"]
+          ["plans", "Service plans"],
+          ["history", "Past services"],
+          ["issues", "Job issues"]
         ].map(([value, label]) => (
           <button
             aria-selected={tab === value}
@@ -2159,10 +3204,12 @@ function SchedulePage() {
             teamId={teamId}
             onDayChange={setDayIndex}
             onCancelBooking={(booking) => setModal({ type: "cancel-booking", booking })}
+            onDuplicate={(booking) => setModal({ type: "duplicate-booking", booking })}
             onEdit={(booking) => setModal({ type: "edit-booking", booking })}
-            onMove={(booking) => setModal({ type: "move", booking })}
+            onFinalizeRoute={finalizeRoute}
             onPlaceFlexible={(service) => setModal({ type: "place", service })}
             onTeamChange={setTeamId}
+            onUnassign={unassignBooking}
           />
         )}
         {resource.status === "ready" && tab === "others" && (
@@ -2180,7 +3227,26 @@ function SchedulePage() {
             from={historyFrom}
             to={historyTo}
             onFromChange={setHistoryFrom}
+            onRestore={(service) => setModal({ type: "restore-booking", booking: service })}
             onToChange={setHistoryTo}
+          />
+        )}
+        {resource.status === "ready" && tab === "plans" && (
+          <RecurringPlans
+            plans={resource.data?.recurringServices || []}
+            status={planStatus}
+            onEnd={(planItem) => planAction(planItem, "ended")}
+            onPause={(planItem) => planAction(planItem, "paused")}
+            onResume={(planItem) => setModal({ type: "resume-plan", plan: planItem })}
+            onStatusChange={setPlanStatus}
+          />
+        )}
+        {resource.status === "ready" && tab === "issues" && (
+          <JobIssues
+            issues={resource.data?.jobIssues || []}
+            status={issueStatus}
+            onResolve={(issue) => setModal({ type: "resolve-issue", issue })}
+            onStatusChange={setIssueStatus}
           />
         )}
       </section>
@@ -2196,6 +3262,22 @@ function SchedulePage() {
           />
         </Modal>
       )}
+      {modal?.type === "duplicate-booking" && (
+        <Modal
+          title={`Duplicate visit - ${modal.booking.customerName}`}
+          description="Review the copied details and choose an open crew and time block."
+          onClose={() => setModal(null)}
+        >
+          <PlannerBookingForm
+            data={referenceData.data}
+            initialBooking={modal.booking}
+            initialDate={modal.booking.serviceDate}
+            initialTeamId={modal.booking.teamId}
+            onCancel={() => setModal(null)}
+            onSaved={() => changed("Booking duplicated on the schedule.")}
+          />
+        </Modal>
+      )}
       {modal?.type === "recurring" && (
         <Modal title="Add recurring service" description="Set the client's permanent frequency, preferred crew, time, and billing." onClose={() => setModal(null)}>
           <RecurringServiceForm
@@ -2203,17 +3285,6 @@ function SchedulePage() {
             initialDate={modal.date}
             onCancel={() => setModal(null)}
             onSaved={() => changed("Recurring service added.")}
-          />
-        </Modal>
-      )}
-      {modal?.type === "move" && (
-        <Modal title={`Move ${modal.booking.customerName}`} description="Choose the new service day, crew, and time block." onClose={() => setModal(null)}>
-          <MoveBookingForm
-            booking={modal.booking}
-            days={plan?.days || []}
-            teams={teams}
-            onCancel={() => setModal(null)}
-            onSaved={() => changed("Booking moved.")}
           />
         </Modal>
       )}
@@ -2245,10 +3316,42 @@ function SchedulePage() {
           <EditBookingForm
             booking={modal.booking}
             serviceTypes={referenceData.data?.serviceTypes || []}
+            teams={teams}
             onCancel={() => setModal(null)}
             onSaved={(scope) => changed(scope === "future"
               ? "Recurring service and future visits updated."
               : "Scheduled service updated.")}
+          />
+        </Modal>
+      )}
+      {modal?.type === "restore-booking" && (
+        <Modal
+          title={`Restore visit - ${modal.booking.customerName}`}
+          description="Choose a new date, time, and crew for this cancelled visit."
+          onClose={() => setModal(null)}
+        >
+          <RestoreVisitForm
+            booking={modal.booking}
+            teams={referenceData.data?.teams || []}
+            onCancel={() => setModal(null)}
+            onSaved={(feePreserved) => changed(
+              feePreserved
+                ? "Visit restored. The previously paid cancellation fee was preserved."
+                : "Visit restored to the schedule."
+            )}
+          />
+        </Modal>
+      )}
+      {modal?.type === "resume-plan" && (
+        <Modal
+          title={`Resume plan - ${modal.plan.customerName}`}
+          description="Choose the first date the customer wants service again."
+          onClose={() => setModal(null)}
+        >
+          <ResumePlanForm
+            plan={modal.plan}
+            onCancel={() => setModal(null)}
+            onSaved={() => changed("Service plan resumed from the selected date.")}
           />
         </Modal>
       )}
@@ -2272,6 +3375,15 @@ function SchedulePage() {
           />
         </Modal>
       )}
+      {modal?.type === "resolve-issue" && (
+        <Modal title={`Resolve issue - ${modal.issue.customerName}`} onClose={() => setModal(null)}>
+          <ResolveIssueForm
+            issue={modal.issue}
+            onCancel={() => setModal(null)}
+            onSaved={() => changed("Job issue resolved.")}
+          />
+        </Modal>
+      )}
     </>
   );
 }
@@ -2284,10 +3396,12 @@ function WeeklySchedule({
   teamId,
   onCancelBooking,
   onDayChange,
+  onDuplicate,
   onEdit,
-  onMove,
+  onFinalizeRoute,
   onPlaceFlexible,
-  onTeamChange
+  onTeamChange,
+  onUnassign
 }) {
   if (!plan?.days?.length) {
     return <StatePanel title="No schedule dates" message="This schedule week has no available days." />;
@@ -2300,6 +3414,7 @@ function WeeklySchedule({
   const crewBookings = (selectedDay?.bookings || []).filter((booking) =>
     selectedCrew === "unassigned" ? !booking.teamId : booking.teamId === selectedCrew
   );
+  const route = crewBookings.find((booking) => booking.routeId);
 
   return (
     <div className="weekly-schedule-layout">
@@ -2354,14 +3469,32 @@ function WeeklySchedule({
             </button>
           ))}
         </div>
+        {route && (
+          <div className="route-publish-bar">
+            <div>
+              <span>Captain route</span>
+              <StatusBadge status={route.routeStatus || "draft"} />
+            </div>
+            {route.routeStatus === "draft" && (
+              <button
+                className="primary-button inline-button"
+                type="button"
+                onClick={() => onFinalizeRoute(route.routeId)}
+              >
+                Finalize crew route
+              </button>
+            )}
+          </div>
+        )}
         {crewTabs.length === 0 ? (
           <StatePanel title="No cleaning crews" message="Add an active team before assigning work." />
         ) : (
           <TimeBlockSchedule
             bookings={crewBookings}
             onCancelBooking={onCancelBooking}
+            onDuplicate={onDuplicate}
             onEdit={onEdit}
-            onMove={onMove}
+            onUnassign={onUnassign}
           />
         )}
       </div>
@@ -2369,7 +3502,7 @@ function WeeklySchedule({
   );
 }
 
-function TimeBlockSchedule({ bookings, onCancelBooking, onEdit, onMove }) {
+function TimeBlockSchedule({ bookings, onCancelBooking, onDuplicate, onEdit, onUnassign }) {
   return (
     <div className="time-block-table">
       <div className="time-block-row time-block-head">
@@ -2405,7 +3538,10 @@ function TimeBlockSchedule({ bookings, onCancelBooking, onEdit, onMove }) {
               {booking.canMove ? (
                 <>
                   <button className="text-button" type="button" onClick={() => onEdit(booking)}>Edit service</button>
-                  <button className="text-button" type="button" onClick={() => onMove(booking)}>Move</button>
+                  {!booking.recurringServiceId && (
+                    <button className="text-button" type="button" onClick={() => onDuplicate(booking)}>Duplicate</button>
+                  )}
+                  {booking.teamId && <button className="text-button" type="button" onClick={() => onUnassign(booking)}>Unassign</button>}
                   <button className="text-button danger-text" type="button" onClick={() => onCancelBooking(booking)}>Cancel visit</button>
                 </>
               ) : <span className="muted">History</span>}
@@ -2432,7 +3568,7 @@ function OtherServices({
         </Field>
       </div>
       {services.length === 0 ? (
-        <StatePanel title="No flexible recurring clients" message="Three-week and monthly services will appear here." />
+        <StatePanel title="No flexible recurring clients" message="Three-week, monthly, and individual-date services will appear here." />
       ) : (
         <div className="data-table other-services-table">
           <div className="data-row data-head"><span>Client</span><span>Address</span><span>Frequency</span><span>Next service</span><span>Schedule</span><span>Last crew</span><span>Actions</span></div>
@@ -2456,7 +3592,115 @@ function OtherServices({
   );
 }
 
-function ServiceHistory({ data, from, to, onFromChange, onToChange }) {
+function RecurringPlans({
+  plans,
+  status,
+  onEnd,
+  onPause,
+  onResume,
+  onStatusChange
+}) {
+  return (
+    <>
+      <div className="toolbar">
+        <Field label="Plan status">
+          <select value={status} onChange={(event) => onStatusChange(event.target.value)}>
+            <option value="">All statuses</option>
+            <option value="active">Active</option>
+            <option value="paused">Paused</option>
+            <option value="ended">Ended</option>
+          </select>
+        </Field>
+      </div>
+      {!plans.length ? (
+        <StatePanel title="No service plans" message="There are no recurring service plans matching this status." />
+      ) : (
+        <div className="data-table recurring-plan-table">
+          <div className="data-row data-head">
+            <span>Client</span><span>Property</span><span>Frequency</span><span>Preferred crew</span><span>Status</span><span>Actions</span>
+          </div>
+          {plans.map((planItem) => (
+            <article className="data-row" key={planItem.id}>
+              <div data-label="Client"><strong>{planItem.customerName}</strong><small>{planItem.serviceName}</small></div>
+              <div data-label="Property"><span>{planItem.addressLine1}</span><small>{planItem.city}, {planItem.postalCode}</small></div>
+              <span data-label="Frequency">{recurrenceLabel(planItem.recurrenceRule)}</span>
+              <span data-label="Preferred crew">{planItem.preferredTeamName || "Any available crew"}</span>
+              <div data-label="Status"><StatusBadge status={planItem.status} /></div>
+              <div className="row-actions" data-label="Actions">
+                {planItem.status === "active" && (
+                  <button className="text-button" type="button" onClick={() => onPause(planItem)}>Pause</button>
+                )}
+                {planItem.status === "paused" && (
+                  <button className="text-button" type="button" onClick={() => onResume(planItem)}>Resume</button>
+                )}
+                {planItem.status !== "ended" && (
+                  <button className="text-button danger-text" type="button" onClick={() => onEnd(planItem)}>End plan</button>
+                )}
+                {planItem.status === "ended" && <span className="muted">Closed</span>}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ResumePlanForm({ plan, onCancel, onSaved }) {
+  const [restartOn, setRestartOn] = useState(nextScheduleDate(localDate()));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    const selected = new Date(`${restartOn}T12:00:00`);
+    let recurrenceRule = plan.recurrenceRule;
+    if (recurrenceRule.type === "dates") {
+      const dates = recurrenceRule.dates.filter((value) => value >= restartOn);
+      dates.push(restartOn);
+      recurrenceRule = { type: "dates", dates: [...new Set(dates)].sort() };
+    }
+    if (recurrenceRule.type === "monthly") {
+      recurrenceRule = { type: "monthly", dayOfMonth: selected.getDate() };
+    }
+    if (recurrenceRule.type === "nth_weekday") {
+      const weekday = selected.getDay();
+      const occurrence = Math.ceil(selected.getDate() / 7);
+      if (weekday === 0 || weekday === 6 || occurrence > 4) {
+        setError("Monthly weekday services must use the first through fourth Monday-Friday.");
+        return;
+      }
+      recurrenceRule = { type: "nth_weekday", weekday, occurrence };
+    }
+    setSaving(true);
+    setError("");
+    try {
+      await api.patch(`/recurring-services/${plan.id}`, {
+        status: "active",
+        startsOn: recurrenceRule.type === "dates" ? recurrenceRule.dates[0] : restartOn,
+        restartOn,
+        recurrenceRule
+      });
+      onSaved();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <Field label="First service date">
+        <input required min={localDate()} type="date" value={restartOn} onChange={(event) => setRestartOn(event.target.value)} />
+      </Field>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions saving={saving} onCancel={onCancel} submitLabel="Resume plan" />
+    </form>
+  );
+}
+
+function ServiceHistory({ data, from, to, onFromChange, onRestore, onToChange }) {
   const services = data?.services || [];
   return (
     <>
@@ -2468,7 +3712,7 @@ function ServiceHistory({ data, from, to, onFromChange, onToChange }) {
         <StatePanel title="No past services" message="Completed and past bookings in this date range will appear here." />
       ) : (
         <div className="data-table service-history-table">
-          <div className="data-row data-head"><span>Date</span><span>Client</span><span>Service</span><span>Crew</span><span>Cleaners</span><span>Status</span></div>
+          <div className="data-row data-head"><span>Date</span><span>Client</span><span>Service</span><span>Crew</span><span>Cleaners</span><span>Status</span><span>Actions</span></div>
           {services.map((service) => (
             <article className="data-row" key={service.id}>
               <div data-label="Date"><strong>{shortDate(service.serviceDate)}</strong><small>{clock(service.scheduledStart)}</small></div>
@@ -2477,6 +3721,11 @@ function ServiceHistory({ data, from, to, onFromChange, onToChange }) {
               <span data-label="Crew">{service.teamName || "Unassigned"}</span>
               <span data-label="Cleaners">{service.employeeNames?.join(", ") || "Not recorded"}</span>
               <div data-label="Status"><StatusBadge status={service.status} /></div>
+              <div data-label="Actions">
+                {service.status === "cancelled"
+                  ? <button className="text-button" type="button" onClick={() => onRestore(service)}>Restore visit</button>
+                  : <span className="muted">-</span>}
+              </div>
             </article>
           ))}
         </div>
@@ -2485,9 +3734,160 @@ function ServiceHistory({ data, from, to, onFromChange, onToChange }) {
   );
 }
 
-function CustomerPropertyPicker({ customerId, propertyId, onChange }) {
-  const [customerSearch, setCustomerSearch] = useState("");
-  const [propertySearch, setPropertySearch] = useState("");
+function RestoreVisitForm({ booking, teams, onCancel, onSaved }) {
+  const [form, setForm] = useState({
+    date: nextScheduleDate(localDate()),
+    startTime: "08:00",
+    teamId: ""
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const result = await api.post(`/schedule-planner/bookings/${booking.id}/restore`, {
+        ...form,
+        teamId: form.teamId || null
+      });
+      onSaved(result.booking.preservedPaidFee);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <div className="form-grid">
+        <Field label="Service date">
+          <input required min={localDate()} type="date" value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })} />
+        </Field>
+        <Field label="Time block">
+          <select value={form.startTime} onChange={(event) => setForm({ ...form, startTime: event.target.value })}>
+            <option value="08:00">8:00 AM</option><option value="10:30">10:30 AM</option>
+            <option value="13:00">1:00 PM</option><option value="15:00">3:00 PM</option>
+          </select>
+        </Field>
+        <Field label="Cleaning crew">
+          <select value={form.teamId} onChange={(event) => setForm({ ...form, teamId: event.target.value })}>
+            <option value="">Unassigned</option>
+            {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+          </select>
+        </Field>
+      </div>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions saving={saving} onCancel={onCancel} submitLabel="Restore visit" />
+    </form>
+  );
+}
+
+function JobIssues({ issues, status, onResolve, onStatusChange }) {
+  return (
+    <>
+      <div className="toolbar">
+        <Field label="Issue status">
+          <select value={status} onChange={(event) => onStatusChange(event.target.value)}>
+            <option value="open">Open</option>
+            <option value="resolved">Resolved</option>
+            <option value="all">All</option>
+          </select>
+        </Field>
+      </div>
+      {!issues.length ? (
+        <StatePanel title="No job issues" message="There are no job issues matching this status." />
+      ) : (
+        <div className="data-table job-issue-table">
+          <div className="data-row data-head">
+            <span>Client</span><span>Date</span><span>Issue</span><span>Reported by</span><span>Status</span><span>Actions</span>
+          </div>
+          {issues.map((issue) => (
+            <article className="data-row" key={issue.id}>
+              <div data-label="Client"><strong>{issue.customerName}</strong><small>{issue.addressLine1}</small></div>
+              <span data-label="Date">{shortDate(issue.serviceDate)}</span>
+              <div data-label="Issue"><strong>{capitalize(issue.type.replaceAll("_", " "))}</strong><small>{issue.description}</small></div>
+              <span data-label="Reported by">
+                {[issue.reportedByFirstName, issue.reportedByLastName].filter(Boolean).join(" ") || "Manager"}
+              </span>
+              <div data-label="Status"><StatusBadge status={issue.resolvedAt ? "resolved" : "open"} /></div>
+              <div className="row-actions" data-label="Actions">
+                {!issue.resolvedAt
+                  ? <button className="text-button" type="button" onClick={() => onResolve(issue)}>Resolve</button>
+                  : <span className="muted">Resolved</span>}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </>
+  );
+}
+
+function ResolveIssueForm({ issue, onCancel, onSaved }) {
+  const [form, setForm] = useState({
+    customerApproved: false,
+    additionalCharge: "",
+    resolutionNotes: ""
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api.patch(`/job-issues/${issue.id}`, {
+        customerApproved: form.customerApproved,
+        additionalChargeCents: form.customerApproved
+          ? cents(form.additionalCharge)
+          : null,
+        resolutionNotes: form.resolutionNotes
+      });
+      onSaved();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <label className="checkbox-field">
+        <input
+          checked={form.customerApproved}
+          type="checkbox"
+          onChange={(event) => setForm({ ...form, customerApproved: event.target.checked })}
+        />
+        Customer approved additional work
+      </label>
+      {form.customerApproved && (
+        <Field label="Additional charge">
+          <input required min="0.01" step="0.01" type="number" value={form.additionalCharge} onChange={(event) => setForm({ ...form, additionalCharge: event.target.value })} />
+        </Field>
+      )}
+      <Field label="Resolution notes">
+        <textarea required maxLength="2000" rows="4" value={form.resolutionNotes} onChange={(event) => setForm({ ...form, resolutionNotes: event.target.value })} />
+      </Field>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions saving={saving} onCancel={onCancel} submitLabel="Resolve issue" />
+    </form>
+  );
+}
+
+function CustomerPropertyPicker({
+  customerId,
+  propertyId,
+  initialCustomerSearch = "",
+  initialPropertySearch = "",
+  onChange
+}) {
+  const [customerSearch, setCustomerSearch] = useState(initialCustomerSearch);
+  const [propertySearch, setPropertySearch] = useState(initialPropertySearch);
   const debouncedCustomerSearch = useDebouncedValue(customerSearch);
   const debouncedPropertySearch = useDebouncedValue(propertySearch);
   const customers = useLoad(() => api.list("customers", {
@@ -2568,20 +3968,33 @@ function CustomerPropertyPicker({ customerId, propertyId, onChange }) {
   );
 }
 
-function PlannerBookingForm({ data, initialDate, initialTeamId, onCancel, onSaved }) {
+function PlannerBookingForm({
+  data,
+  initialBooking,
+  initialDate,
+  initialTeamId,
+  onCancel,
+  onSaved
+}) {
   const serviceTypes = data?.serviceTypes || [];
   const teams = data?.teams || [];
   const [form, setForm] = useState({
-    customerId: "",
-    propertyId: "",
-    serviceTypeId: serviceTypes[0]?.id || "",
+    customerId: initialBooking?.customerId || "",
+    propertyId: initialBooking?.propertyId || "",
+    serviceTypeId: initialBooking?.serviceTypeId || serviceTypes[0]?.id || "",
     date: initialDate || localDate(),
-    startTime: "08:00",
+    startTime: initialBooking?.startTime || "08:00",
     teamId: initialTeamId || "",
-    expectedDurationMinutes: serviceTypes[0]?.defaultDurationMinutes || 150,
-    billingType: "flat",
-    amount: "",
-    specialRequests: ""
+    expectedDurationMinutes: initialBooking?.expectedDurationMinutes
+      || serviceTypes[0]?.defaultDurationMinutes
+      || 150,
+    billingType: initialBooking?.billingType || "flat",
+    amount: initialBooking
+      ? (Number(initialBooking.billingType === "hourly"
+        ? initialBooking.billingRateCents
+        : initialBooking.priceCents) / 100).toFixed(2)
+      : "",
+    specialRequests: initialBooking?.specialInstructions || ""
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -2604,12 +4017,11 @@ function PlannerBookingForm({ data, initialDate, initialTeamId, onCancel, onSave
           : rate,
         billingType: form.billingType,
         billingRateCents: form.billingType === "hourly" ? rate : null,
-        specialRequests: form.specialRequests
-      });
-      await api.post(`/schedule-planner/bookings/${result.booking.id}/move`, {
-        teamId: form.teamId || null,
-        date: form.date,
-        startTime: form.startTime
+        specialRequests: form.specialRequests,
+        previousBookingId: initialBooking?.id || null,
+        serviceDate: form.date,
+        startTime: form.startTime,
+        teamId: form.teamId || null
       });
       onSaved();
     } catch (requestError) {
@@ -2624,6 +4036,8 @@ function PlannerBookingForm({ data, initialDate, initialTeamId, onCancel, onSave
       <div className="form-grid">
         <CustomerPropertyPicker
           customerId={form.customerId}
+          initialCustomerSearch={initialBooking?.customerName || ""}
+          initialPropertySearch={initialBooking?.addressLine1 || ""}
           propertyId={form.propertyId}
           onChange={(selection) => setForm((current) => ({ ...current, ...selection }))}
         />
@@ -2667,7 +4081,12 @@ function PlannerBookingForm({ data, initialDate, initialTeamId, onCancel, onSave
       </div>
       <Field label="Special instructions"><textarea rows="3" maxLength="5000" value={form.specialRequests} onChange={(event) => setForm({ ...form, specialRequests: event.target.value })} /></Field>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <FormActions saving={saving} disabled={!form.propertyId || !form.serviceTypeId} onCancel={onCancel} submitLabel="Add booking" />
+      <FormActions
+        saving={saving}
+        disabled={!form.propertyId || !form.serviceTypeId}
+        onCancel={onCancel}
+        submitLabel={initialBooking ? "Duplicate booking" : "Add booking"}
+      />
     </form>
   );
 }
@@ -2689,6 +4108,8 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
     dayOfMonth: "1",
     occurrence: "1",
     weekday: "1",
+    individualDate: initialDate || localDate(),
+    individualDates: initialDate ? [initialDate] : [],
     specialInstructions: ""
   });
   const [saving, setSaving] = useState(false);
@@ -2699,7 +4120,9 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
     setSaving(true);
     setError("");
     const rate = cents(form.amount);
-    const recurrenceRule = form.frequency === "weekly"
+    const recurrenceRule = form.frequency === "individual_dates"
+      ? { type: "dates", dates: [...form.individualDates].sort() }
+      : form.frequency === "weekly"
       ? { type: "weekly", intervalWeeks: 1 }
       : form.frequency === "biweekly"
         ? { type: "weekly", intervalWeeks: 2 }
@@ -2728,7 +4151,9 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
         billingType: form.billingType,
         billingRateCents: form.billingType === "hourly" ? rate : null,
         specialInstructions: form.specialInstructions,
-        startsOn: form.startsOn
+        startsOn: form.frequency === "individual_dates"
+          ? [...form.individualDates].sort()[0]
+          : form.startsOn
       });
       onSaved();
     } catch (requestError) {
@@ -2772,9 +4197,12 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
             <option value="three_week">Every 3 weeks</option>
             <option value="monthly_date">Monthly date</option>
             <option value="nth_weekday">Monthly weekday</option>
+            <option value="individual_dates">Individual dates</option>
           </select>
         </Field>
-        <Field label="First service"><input required type="date" value={form.startsOn} onChange={(event) => setForm({ ...form, startsOn: event.target.value })} /></Field>
+        {form.frequency !== "individual_dates" && (
+          <Field label="First service"><input required type="date" value={form.startsOn} onChange={(event) => setForm({ ...form, startsOn: event.target.value })} /></Field>
+        )}
         {form.frequency === "monthly_date" && (
           <Field label="Day of month"><input required min="1" max="31" type="number" value={form.dayOfMonth} onChange={(event) => setForm({ ...form, dayOfMonth: event.target.value })} /></Field>
         )}
@@ -2794,6 +4222,29 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
             </Field>
           </>
         )}
+        {form.frequency === "individual_dates" && (
+          <div className="individual-date-picker">
+            <Field label="Service date">
+              <input
+                min={localDate()}
+                type="date"
+                value={form.individualDate}
+                onChange={(event) => setForm({ ...form, individualDate: event.target.value })}
+              />
+            </Field>
+            <button
+              className="secondary-button compact-button"
+              disabled={!form.individualDate || form.individualDates.includes(form.individualDate)}
+              type="button"
+              onClick={() => setForm({
+                ...form,
+                individualDates: [...form.individualDates, form.individualDate].sort()
+              })}
+            >
+              Add date
+            </button>
+          </div>
+        )}
         <Field label="Time block">
           <select value={form.preferredStartTime} onChange={(event) => setForm({ ...form, preferredStartTime: event.target.value })}>
             <option value="08:00">8:00 AM</option><option value="10:30">10:30 AM</option>
@@ -2812,16 +4263,45 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
           <input required min="0" step="0.01" type="number" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} />
         </Field>
       </div>
+      {form.frequency === "individual_dates" && (
+        <div className="selected-date-list" aria-label="Selected service dates">
+          {form.individualDates.length ? form.individualDates.map((date) => (
+            <div key={date}>
+              <span>{shortDate(date)}</span>
+              <button
+                aria-label={`Remove ${shortDate(date)}`}
+                className="text-button danger-text"
+                type="button"
+                onClick={() => setForm({
+                  ...form,
+                  individualDates: form.individualDates.filter((value) => value !== date)
+                })}
+              >
+                Remove
+              </button>
+            </div>
+          )) : <p className="form-error">Add at least one service date.</p>}
+        </div>
+      )}
       <Field label="Special instructions"><textarea rows="3" maxLength="5000" value={form.specialInstructions} onChange={(event) => setForm({ ...form, specialInstructions: event.target.value })} /></Field>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <FormActions saving={saving} disabled={!form.propertyId || !form.serviceTypeId} onCancel={onCancel} submitLabel="Add recurring service" />
+      <FormActions
+        saving={saving}
+        disabled={!form.propertyId || !form.serviceTypeId
+          || (form.frequency === "individual_dates" && !form.individualDates.length)}
+        onCancel={onCancel}
+        submitLabel="Add recurring service"
+      />
     </form>
   );
 }
 
-function EditBookingForm({ booking, serviceTypes, onCancel, onSaved }) {
+function EditBookingForm({ booking, serviceTypes, teams, onCancel, onSaved }) {
   const [form, setForm] = useState({
     updateScope: "single",
+    serviceDate: booking.serviceDate,
+    startTime: booking.startTime,
+    teamId: booking.teamId || "",
     serviceTypeId: booking.serviceTypeId || "",
     expectedDurationMinutes: booking.expectedDurationMinutes || 150,
     billingType: booking.billingType || "flat",
@@ -2841,6 +4321,9 @@ function EditBookingForm({ booking, serviceTypes, onCancel, onSaved }) {
     try {
       await api.patch(`/bookings/${booking.id}`, {
         updateScope: form.updateScope,
+        serviceDate: form.serviceDate,
+        startTime: form.startTime,
+        teamId: form.teamId || null,
         serviceTypeId: form.serviceTypeId,
         expectedDurationMinutes: Number(form.expectedDurationMinutes),
         priceCents: form.billingType === "hourly"
@@ -2872,6 +4355,27 @@ function EditBookingForm({ booking, serviceTypes, onCancel, onSaved }) {
         </Field>
       )}
       <div className="form-grid">
+        <Field label="Service date">
+          <input
+            required
+            min={localDate()}
+            type="date"
+            value={form.serviceDate}
+            onChange={(event) => setForm({ ...form, serviceDate: event.target.value })}
+          />
+        </Field>
+        <Field label="Time block">
+          <select value={form.startTime} onChange={(event) => setForm({ ...form, startTime: event.target.value })}>
+            <option value="08:00">8:00 AM</option><option value="10:30">10:30 AM</option>
+            <option value="13:00">1:00 PM</option><option value="15:00">3:00 PM</option>
+          </select>
+        </Field>
+        <Field label="Cleaning crew">
+          <select value={form.teamId} onChange={(event) => setForm({ ...form, teamId: event.target.value })}>
+            <option value="">Unassigned</option>
+            {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+          </select>
+        </Field>
         <Field label="Service">
           <select required value={form.serviceTypeId} onChange={(event) => setForm({ ...form, serviceTypeId: event.target.value })}>
             <option value="">Select service</option>
@@ -2906,60 +4410,6 @@ function EditBookingForm({ booking, serviceTypes, onCancel, onSaved }) {
       </Field>
       {error && <p className="form-error" role="alert">{error}</p>}
       <FormActions saving={saving} onCancel={onCancel} submitLabel="Save service" />
-    </form>
-  );
-}
-
-function MoveBookingForm({ booking, days, teams, onCancel, onSaved }) {
-  const [form, setForm] = useState({
-    date: booking.serviceDate,
-    teamId: booking.teamId || "",
-    startTime: booking.startTime
-  });
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  async function submit(event) {
-    event.preventDefault();
-    setSaving(true);
-    setError("");
-    try {
-      await api.post(`/schedule-planner/bookings/${booking.id}/move`, {
-        teamId: form.teamId || null,
-        date: form.date,
-        startTime: form.startTime
-      });
-      onSaved();
-    } catch (requestError) {
-      setError(errorMessage(requestError));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <form className="modal-form" onSubmit={submit}>
-      <div className="form-grid">
-        <Field label="Service day">
-          <select value={form.date} onChange={(event) => setForm({ ...form, date: event.target.value })}>
-            {days.map((day) => <option key={day.date} value={day.date}>{day.dayName} - {shortDate(day.date)}</option>)}
-          </select>
-        </Field>
-        <Field label="Cleaning crew">
-          <select value={form.teamId} onChange={(event) => setForm({ ...form, teamId: event.target.value })}>
-            <option value="">Unassigned</option>
-            {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
-          </select>
-        </Field>
-        <Field label="Time block">
-          <select value={form.startTime} onChange={(event) => setForm({ ...form, startTime: event.target.value })}>
-            <option value="08:00">8:00 AM</option><option value="10:30">10:30 AM</option>
-            <option value="13:00">1:00 PM</option><option value="15:00">3:00 PM</option>
-          </select>
-        </Field>
-      </div>
-      {error && <p className="form-error" role="alert">{error}</p>}
-      <FormActions saving={saving} onCancel={onCancel} submitLabel="Move booking" />
     </form>
   );
 }
@@ -3159,6 +4609,15 @@ function NextServiceDateForm({ reference, service, onCancel, onSaved }) {
     setError("");
     const selected = new Date(`${nextDate}T12:00:00`);
     let recurrenceRule = service.recurrenceRule;
+    let startsOn = nextDate;
+    if (recurrenceRule.type === "dates") {
+      const dates = recurrenceRule.dates
+        .filter((value) => value !== service.nextDueDate);
+      dates.push(nextDate);
+      dates.sort();
+      recurrenceRule = { type: "dates", dates: [...new Set(dates)] };
+      startsOn = recurrenceRule.dates[0];
+    }
     if (recurrenceRule.type === "monthly") {
       recurrenceRule = { type: "monthly", dayOfMonth: selected.getDate() };
     }
@@ -3174,7 +4633,7 @@ function NextServiceDateForm({ reference, service, onCancel, onSaved }) {
     }
     try {
       await api.patch(`/recurring-services/${service.id}`, {
-        startsOn: nextDate,
+        startsOn,
         recurrenceRule
       });
       onSaved();
@@ -3805,7 +5264,7 @@ function PayrollHoursForm({ entry, period, weekIndex = 0, onCancel, onSaved }) {
 }
 
 function payrollWeekdays(weekStartsOn) {
-  return ["Mon", "Tue", "Wed", "Thu", "Fri"].map((name, index) => ({
+  return ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((name, index) => ({
     name,
     date: shiftDate(weekStartsOn, index)
   }));
@@ -3859,10 +5318,18 @@ function isMonday(value) {
 }
 
 function MessagesPage() {
+  const [tab, setTab] = useState("outbound");
   const [status, setStatus] = useState("");
+  const [compose, setCompose] = useState(false);
   const [notice, setNotice] = useState(null);
-  const resource = useLoad(() => api.get("/notifications", { status }), [status]);
+  const resource = useLoad(
+    () => tab === "outbound"
+      ? api.get("/notifications", { status })
+      : api.get("/inbound-messages"),
+    [tab, status]
+  );
   const notifications = resource.data?.notifications || [];
+  const inboundMessages = resource.data?.messages || [];
 
   async function sendDue() {
     try {
@@ -3884,43 +5351,161 @@ function MessagesPage() {
     }
   }
 
+  async function retry(id) {
+    try {
+      await api.post(`/notifications/${id}/retry`);
+      setNotice({ message: "Message queued for another delivery attempt." });
+      resource.reload();
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    }
+  }
+
   return (
     <>
       <PageHeader eyebrow="Customer communication" title="Messages" description="Queued, sent, failed, and cancelled customer text messages.">
-        <button className="primary-button inline-button" type="button" onClick={sendDue}>Send due messages</button>
+        {tab === "outbound" && (
+          <>
+            <button className="secondary-button" type="button" onClick={() => setCompose(true)}>Compose message</button>
+            <button className="primary-button inline-button" type="button" onClick={sendDue}>Send due messages</button>
+          </>
+        )}
       </PageHeader>
       <Notice notice={notice} onClose={() => setNotice(null)} />
-      <section className="section-block">
-        <div className="toolbar">
-          <select aria-label="Filter message status" value={status} onChange={(event) => setStatus(event.target.value)}>
-            <option value="">All statuses</option><option value="queued">Queued</option><option value="sent">Sent</option>
-            <option value="delivered">Delivered</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option>
-          </select>
-          <button className="secondary-button" type="button" onClick={resource.reload}>Refresh</button>
+      <section className="section-block message-tabs">
+        <div className="segmented-control" role="tablist" aria-label="Message views">
+          <button aria-selected={tab === "outbound"} className={tab === "outbound" ? "active" : ""} role="tab" type="button" onClick={() => setTab("outbound")}>Outbound</button>
+          <button aria-selected={tab === "inbound"} className={tab === "inbound" ? "active" : ""} role="tab" type="button" onClick={() => setTab("inbound")}>Inbox</button>
         </div>
-        {resource.status === "loading" && <LoadingRows />}
-        {resource.status === "error" && <StatePanel title="Messages unavailable" message={resource.error} />}
-        {resource.status === "ready" && resource.data?.providerConfigured === false && (
-          <StatePanel title="Text provider is not configured" message="Queued messages are retained, but they cannot be delivered until the business SMS provider is connected." />
-        )}
-        {resource.status === "ready" && notifications.length === 0 && <StatePanel title="No messages" message="There are no notifications matching this status." />}
-        {resource.status === "ready" && notifications.length > 0 && (
-          <div className="data-table message-table">
-            <div className="data-row data-head"><span>Type</span><span>Destination</span><span>Message</span><span>Due</span><span>Status</span><span>Actions</span></div>
-            {notifications.map((notification) => (
-              <article className="data-row" key={notification.id}>
-                <div data-label="Type">{capitalize(notification.type.replaceAll("_", " "))}</div>
-                <div data-label="Destination">{notification.destination}</div>
-                <div className="message-body" data-label="Message">{notification.body}<small>{notification.failureReason}</small></div>
-                <div data-label="Due">{dateTime(notification.dueAt)}</div>
-                <div data-label="Status"><StatusBadge status={notification.status} /></div>
-                <div data-label="Actions">{notification.status === "queued" && <button className="text-button danger-text" type="button" onClick={() => cancel(notification.id)}>Cancel</button>}</div>
-              </article>
-            ))}
-          </div>
-        )}
       </section>
+      {tab === "outbound" && (
+        <section className="section-block" role="tabpanel">
+          <div className="toolbar">
+            <select aria-label="Filter message status" value={status} onChange={(event) => setStatus(event.target.value)}>
+              <option value="">All statuses</option><option value="queued">Queued</option><option value="sent">Sent</option>
+              <option value="delivered">Delivered</option><option value="failed">Failed</option><option value="cancelled">Cancelled</option>
+            </select>
+            <button className="secondary-button" type="button" onClick={resource.reload}>Refresh</button>
+          </div>
+          {resource.status === "loading" && <LoadingRows />}
+          {resource.status === "error" && <StatePanel title="Messages unavailable" message={resource.error} />}
+          {resource.status === "ready" && resource.data?.providerConfigured === false && (
+            <StatePanel title="Text provider is not configured" message="Queued messages are retained, but they cannot be delivered until the business SMS provider is connected." />
+          )}
+          {resource.status === "ready" && notifications.length === 0 && <StatePanel title="No messages" message="There are no notifications matching this status." />}
+          {resource.status === "ready" && notifications.length > 0 && (
+            <div className="data-table message-table">
+              <div className="data-row data-head"><span>Type</span><span>Destination</span><span>Message</span><span>Due</span><span>Status</span><span>Actions</span></div>
+              {notifications.map((notification) => (
+                <article className="data-row" key={notification.id}>
+                  <div data-label="Type">{capitalize(notification.type.replaceAll("_", " "))}</div>
+                  <div data-label="Destination">
+                    <strong>{notification.customerName || notification.destination}</strong>
+                    {notification.customerName && <small>{notification.destination}</small>}
+                  </div>
+                  <div className="message-body" data-label="Message">{notification.body}<small>{notification.failureReason}</small></div>
+                  <div data-label="Due">{dateTime(notification.dueAt)}</div>
+                  <div data-label="Status"><StatusBadge status={notification.status} /></div>
+                  <div className="row-actions" data-label="Actions">
+                    {notification.status === "queued" && <button className="text-button danger-text" type="button" onClick={() => cancel(notification.id)}>Cancel</button>}
+                    {notification.status === "failed" && <button className="text-button" type="button" onClick={() => retry(notification.id)}>Retry</button>}
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+      {tab === "inbound" && (
+        <section className="section-block" role="tabpanel">
+          <SectionHeader eyebrow="Customer replies" title="Inbox" count={resource.status === "ready" ? inboundMessages.length : undefined} />
+          {resource.status === "loading" && <LoadingRows />}
+          {resource.status === "error" && <StatePanel title="Inbox unavailable" message={resource.error} />}
+          {resource.status === "ready" && inboundMessages.length === 0 && <StatePanel title="No inbound messages" message="Customer replies will appear here after the SMS provider is connected." />}
+          {resource.status === "ready" && inboundMessages.length > 0 && (
+            <div className="data-table inbound-message-table">
+              <div className="data-row data-head"><span>Customer</span><span>Message</span><span>Received</span><span>Consent event</span></div>
+              {inboundMessages.map((message) => (
+                <article className="data-row" key={message.id}>
+                  <div data-label="Customer"><strong>{message.customerName || "Unknown number"}</strong><small>{message.fromPhone}</small></div>
+                  <div data-label="Message">{message.body || "(No message body)"}</div>
+                  <div data-label="Received">{dateTime(message.receivedAt)}</div>
+                  <div data-label="Consent event">{message.optOutType || "-"}</div>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
+      {compose && (
+        <Modal title="Compose customer text" onClose={() => setCompose(false)}>
+          <ComposeMessageForm
+            onCancel={() => setCompose(false)}
+            onSaved={() => {
+              setCompose(false);
+              setNotice({ message: "Customer message queued." });
+              resource.reload();
+            }}
+          />
+        </Modal>
+      )}
     </>
+  );
+}
+
+function ComposeMessageForm({ onCancel, onSaved }) {
+  const [search, setSearch] = useState("");
+  const debouncedSearch = useDebouncedValue(search);
+  const customers = useLoad(() => api.list("customers", {
+    status: "active",
+    q: debouncedSearch,
+    limit: 20
+  }), [debouncedSearch]);
+  const [customerId, setCustomerId] = useState("");
+  const [body, setBody] = useState("");
+  const [dueAt, setDueAt] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api.post(`/customers/${customerId}/messages`, {
+        body,
+        ...(dueAt ? { dueAt: new Date(dueAt).toISOString() } : {})
+      });
+      onSaved();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <Field label="Find customer">
+        <input placeholder="Search name, phone, or email" type="search" value={search} onChange={(event) => setSearch(event.target.value)} />
+      </Field>
+      <Field label="Customer">
+        <select required value={customerId} onChange={(event) => setCustomerId(event.target.value)}>
+          <option value="">Select customer</option>
+          {(customers.data?.customers || []).map((customer) => (
+            <option key={customer.id} value={customer.id}>{customer.name} - {customer.phone}</option>
+          ))}
+        </select>
+      </Field>
+      <Field label="Message" hint={`${body.length}/1600`}>
+        <textarea required maxLength="1600" rows="5" value={body} onChange={(event) => setBody(event.target.value)} />
+      </Field>
+      <Field label="Send at" hint="Leave blank to send now">
+        <input type="datetime-local" value={dueAt} onChange={(event) => setDueAt(event.target.value)} />
+      </Field>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions saving={saving} onCancel={onCancel} submitLabel="Queue message" />
+    </form>
   );
 }
 
@@ -3946,7 +5531,7 @@ function ReportsPage() {
   const [financialQuery, setFinancialQuery] = useState(initialFinancial);
   const [comparisonForm, setComparisonForm] = useState(initialComparison);
   const [comparisonQuery, setComparisonQuery] = useState(initialComparison);
-  const [expenseModal, setExpenseModal] = useState(false);
+  const [expenseModal, setExpenseModal] = useState(null);
   const [notice, setNotice] = useState(null);
   const periodsResource = useLoad(() => api.get("/payroll-periods"), []);
   const financial = useLoad(
@@ -3995,7 +5580,7 @@ function ReportsPage() {
   }
 
   function refreshFinancial(message) {
-    setExpenseModal(false);
+    setExpenseModal(null);
     setNotice({ message });
     financial.reload();
     expenses.reload();
@@ -4004,7 +5589,7 @@ function ReportsPage() {
   return (
     <>
       <PageHeader eyebrow="Business performance" title="Reports" description="Financial results, operating expenses, customer retention, and period comparisons.">
-        {tab === "financial" && <button className="primary-button inline-button" type="button" onClick={() => setExpenseModal(true)}>Record expense</button>}
+        {tab === "financial" && <button className="primary-button inline-button" type="button" onClick={() => setExpenseModal({})}>Record expense</button>}
       </PageHeader>
       <Notice notice={notice} onClose={() => setNotice(null)} />
       <section className="section-block report-tabs">
@@ -4128,13 +5713,31 @@ function ReportsPage() {
             {expenses.status === "ready" && expenseRows.length === 0 && <StatePanel title="No operating expenses" message="Supplies, fuel, equipment, software, and other costs for this period will appear here." />}
             {expenses.status === "ready" && expenseRows.length > 0 && (
               <div className="data-table expense-record-table">
-                <div className="data-row data-head"><span>Date</span><span>Category</span><span>Description</span><span>Amount</span></div>
+                <div className="data-row data-head"><span>Date</span><span>Category</span><span>Description</span><span>Amount</span><span>Status</span><span>Actions</span></div>
                 {expenseRows.map((expense, index) => (
                   <article className="data-row" key={expense.id || `${expense.spentOn}-${index}`}>
                     <div data-label="Date">{shortDate(expense.spentOn)}</div>
                     <div data-label="Category">{capitalize(expense.category.replaceAll("_", " "))}</div>
-                    <div data-label="Description"><strong>{expense.description}</strong></div>
+                    <div data-label="Description"><strong>{expense.description}</strong>{expense.voidReason && <small>{expense.voidReason}</small>}</div>
                     <div data-label="Amount"><strong>{money(expense.amountCents)}</strong></div>
+                    <div data-label="Status"><StatusBadge status={expense.status} /></div>
+                    <div className="row-actions" data-label="Actions">
+                      {expense.status === "recorded" ? (
+                        <>
+                          <button className="text-button" type="button" onClick={() => setExpenseModal({ expense })}>Edit</button>
+                          <button className="text-button danger-text" type="button" onClick={async () => {
+                            const reason = window.prompt("Why should this expense be voided?");
+                            if (!reason?.trim()) return;
+                            try {
+                              await api.post(`/expenses/${expense.id}/void`, { reason: reason.trim() });
+                              refreshFinancial("Expense voided.");
+                            } catch (error) {
+                              setNotice({ type: "error", message: errorMessage(error) });
+                            }
+                          }}>Void</button>
+                        </>
+                      ) : <span className="muted">Corrected</span>}
+                    </div>
                   </article>
                 ))}
               </div>
@@ -4181,11 +5784,18 @@ function ReportsPage() {
       )}
 
       {expenseModal && (
-        <Modal title="Record expense" description="Add an operating cost to financial reporting." onClose={() => setExpenseModal(false)}>
+        <Modal
+          title={expenseModal.expense ? "Edit expense" : "Record expense"}
+          description={expenseModal.expense ? "Correct the recorded operating cost." : "Add an operating cost to financial reporting."}
+          onClose={() => setExpenseModal(null)}
+        >
           <ExpenseForm
+            expense={expenseModal.expense}
             defaultDate={financialQuery.to}
-            onCancel={() => setExpenseModal(false)}
-            onSaved={() => refreshFinancial("Expense recorded.")}
+            onCancel={() => setExpenseModal(null)}
+            onSaved={() => refreshFinancial(
+              expenseModal.expense ? "Expense updated." : "Expense recorded."
+            )}
           />
         </Modal>
       )}
@@ -4229,12 +5839,12 @@ function ComparisonTable({ comparison }) {
   );
 }
 
-function ExpenseForm({ defaultDate, onCancel, onSaved }) {
+function ExpenseForm({ defaultDate, expense, onCancel, onSaved }) {
   const [form, setForm] = useState({
-    spentOn: defaultDate || localDate(),
-    category: "supplies",
-    description: "",
-    amount: ""
+    spentOn: expense?.spentOn || defaultDate || localDate(),
+    category: expense?.category || "supplies",
+    description: expense?.description || "",
+    amount: expense ? (Number(expense.amountCents) / 100).toFixed(2) : ""
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -4244,12 +5854,14 @@ function ExpenseForm({ defaultDate, onCancel, onSaved }) {
     setSaving(true);
     setError("");
     try {
-      await api.post("/expenses", {
+      const payload = {
         spentOn: form.spentOn,
         category: form.category,
         description: form.description,
         amountCents: cents(form.amount)
-      });
+      };
+      if (expense) await api.patch(`/expenses/${expense.id}`, payload);
+      else await api.post("/expenses", payload);
       onSaved();
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -4275,7 +5887,7 @@ function ExpenseForm({ defaultDate, onCancel, onSaved }) {
       </div>
       <Field label="Description"><input required maxLength="500" value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} /></Field>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <FormActions saving={saving} onCancel={onCancel} submitLabel="Record expense" />
+      <FormActions saving={saving} onCancel={onCancel} submitLabel={expense ? "Save expense" : "Record expense"} />
     </form>
   );
 }
@@ -4293,7 +5905,9 @@ function SettingsPage() {
         <div className="segmented-control" aria-label="Settings views">
           {[
             ["business", "Business"],
+            ["services", "Services"],
             ["accounts", "Accounts"],
+            ["history", "Activity"],
             ["security", "Security"],
             ["imports", "Imports"]
           ].map(([value, label]) => (
@@ -4310,7 +5924,9 @@ function SettingsPage() {
         </div>
       </section>
       {tab === "business" && <BusinessSettingsPanel />}
+      {tab === "services" && <ServiceTypesPanel />}
       {tab === "accounts" && <AccountsPanel />}
+      {tab === "history" && <AuditHistoryPanel />}
       {tab === "security" && <SecurityPanel />}
       {tab === "imports" && <ImportsPanel />}
     </>
@@ -4389,6 +6005,222 @@ function BusinessSettingsPanel() {
         )}
       </section>
     </>
+  );
+}
+
+function ServiceTypesPanel() {
+  const resource = useLoad(
+    () => api.list("service-types", { limit: 100 }),
+    []
+  );
+  const [modal, setModal] = useState(null);
+  const [notice, setNotice] = useState(null);
+  const services = resource.data?.serviceTypes || [];
+
+  async function setActive(service, active) {
+    const verb = active ? "reactivate" : "deactivate";
+    if (!window.confirm(`${capitalize(verb)} ${service.name}?`)) return;
+    try {
+      await api.update("service-types", service.id, { active });
+      setNotice({ message: `${service.name} ${active ? "reactivated" : "deactivated"}.` });
+      resource.reload();
+    } catch (error) {
+      setNotice({ type: "error", message: errorMessage(error) });
+    }
+  }
+
+  return (
+    <section className="section-block settings-section">
+      <Notice notice={notice} onClose={() => setNotice(null)} />
+      <SectionHeader eyebrow="Scheduling catalog" title="Service types" count={services.length}>
+        <button className="primary-button inline-button" type="button" onClick={() => setModal({})}>
+          Add service
+        </button>
+      </SectionHeader>
+      {resource.status === "loading" && <LoadingRows />}
+      {resource.status === "error" && <StatePanel title="Services unavailable" message={resource.error} />}
+      {resource.status === "ready" && !services.length && (
+        <StatePanel title="No service types" message="Add the first service offered by the business." />
+      )}
+      {resource.status === "ready" && services.length > 0 && (
+        <div className="data-table service-type-table">
+          <div className="data-row data-head">
+            <span>Service</span><span>Category</span><span>Duration</span>
+            <span>Status</span><span>Actions</span>
+          </div>
+          {services.map((service) => (
+            <article className="data-row" key={service.id}>
+              <div data-label="Service">
+                <strong>{service.name}</strong>
+                <small>{service.referenceChecklist?.length || 0} checklist items</small>
+              </div>
+              <div data-label="Category">{capitalize(service.category)}</div>
+              <div data-label="Duration">
+                {service.defaultDurationMinutes
+                  ? `${service.defaultDurationMinutes} min`
+                  : "Not set"}
+              </div>
+              <div data-label="Status">
+                <StatusBadge status={service.active ? "active" : "inactive"} />
+              </div>
+              <div className="row-actions" data-label="Actions">
+                <button className="text-button" type="button" onClick={() => setModal({ service })}>
+                  Edit
+                </button>
+                <button
+                  className={`text-button ${service.active ? "danger-text" : ""}`}
+                  type="button"
+                  onClick={() => setActive(service, !service.active)}
+                >
+                  {service.active ? "Deactivate" : "Reactivate"}
+                </button>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+      {modal && (
+        <Modal title={modal.service ? "Edit service" : "Add service"} onClose={() => setModal(null)}>
+          <ServiceTypeForm
+            service={modal.service}
+            onCancel={() => setModal(null)}
+            onSaved={() => {
+              setModal(null);
+              setNotice({ message: modal.service ? "Service updated." : "Service added." });
+              resource.reload();
+            }}
+          />
+        </Modal>
+      )}
+    </section>
+  );
+}
+
+function ServiceTypeForm({ service, onCancel, onSaved }) {
+  const [form, setForm] = useState({
+    name: service?.name || "",
+    category: service?.category || "residential",
+    defaultDurationMinutes: service?.defaultDurationMinutes || "",
+    checklist: service?.referenceChecklist?.join("\n") || ""
+  });
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    const payload = {
+      name: form.name,
+      category: form.category,
+      defaultDurationMinutes: form.defaultDurationMinutes
+        ? Number(form.defaultDurationMinutes)
+        : null,
+      referenceChecklist: form.checklist
+        .split("\n")
+        .map((item) => item.trim())
+        .filter(Boolean)
+    };
+    try {
+      if (service) await api.update("service-types", service.id, payload);
+      else await api.create("service-types", payload);
+      onSaved();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <div className="form-grid">
+        <Field label="Service name">
+          <input required maxLength="150" value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
+        </Field>
+        <Field label="Category">
+          <select value={form.category} onChange={(event) => setForm({ ...form, category: event.target.value })}>
+            <option value="residential">Residential</option>
+            <option value="commercial">Commercial</option>
+            <option value="addon">Add-on</option>
+          </select>
+        </Field>
+        <Field label="Default duration" hint="Minutes">
+          <input min="1" max="1440" type="number" value={form.defaultDurationMinutes} onChange={(event) => setForm({ ...form, defaultDurationMinutes: event.target.value })} />
+        </Field>
+      </div>
+      <Field label="Reference checklist" hint="One item per line">
+        <textarea rows="6" value={form.checklist} onChange={(event) => setForm({ ...form, checklist: event.target.value })} />
+      </Field>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions saving={saving} onCancel={onCancel} submitLabel={service ? "Save service" : "Add service"} />
+    </form>
+  );
+}
+
+function AuditHistoryPanel() {
+  const [form, setForm] = useState({ entityType: "", entityId: "", action: "" });
+  const [query, setQuery] = useState(form);
+  const resource = useLoad(
+    () => api.get("/audit-events", { ...query, limit: 100 }),
+    [query.entityType, query.entityId, query.action]
+  );
+  const events = resource.data?.events || [];
+
+  return (
+    <section className="section-block settings-section">
+      <SectionHeader eyebrow="Accountability" title="Activity history" count={events.length} />
+      <form className="toolbar audit-toolbar" onSubmit={(event) => {
+        event.preventDefault();
+        setQuery(form);
+      }}>
+        <input aria-label="Filter entity type" placeholder="Record type" value={form.entityType} onChange={(event) => setForm({ ...form, entityType: event.target.value })} />
+        <input aria-label="Filter record ID" placeholder="Record ID" value={form.entityId} onChange={(event) => setForm({ ...form, entityId: event.target.value })} />
+        <input aria-label="Filter action" placeholder="Action" value={form.action} onChange={(event) => setForm({ ...form, action: event.target.value })} />
+        <button className="secondary-button" type="submit">Filter</button>
+        <button className="text-button" type="button" onClick={() => {
+          const empty = { entityType: "", entityId: "", action: "" };
+          setForm(empty);
+          setQuery(empty);
+        }}>Clear</button>
+      </form>
+      {resource.status === "loading" && <LoadingRows />}
+      {resource.status === "error" && <StatePanel title="History unavailable" message={resource.error} />}
+      {resource.status === "ready" && !events.length && (
+        <StatePanel title="No activity" message="No changes match these filters." />
+      )}
+      {resource.status === "ready" && events.length > 0 && (
+        <div className="data-table audit-table">
+          <div className="data-row data-head">
+            <span>When</span><span>User</span><span>Record</span><span>Action</span><span>Details</span>
+          </div>
+          {events.map((event) => (
+            <article className="data-row" key={event.id}>
+              <div data-label="When">{dateTime(event.createdAt)}</div>
+              <div data-label="User">{event.actorName || "System"}</div>
+              <div data-label="Record">
+                <strong>{capitalize(
+                  event.entityType
+                    .replace(/([a-z])([A-Z])/g, "$1 $2")
+                    .replaceAll("_", " ")
+                )}</strong>
+                <small>{event.entityId || "Batch action"}</small>
+              </div>
+              <div data-label="Action">
+                <StatusBadge status={event.action.replaceAll("_", " ")} />
+                {event.reason && <small>{event.reason}</small>}
+              </div>
+              <div data-label="Details">
+                <details>
+                  <summary>View change</summary>
+                  <pre>{JSON.stringify({ before: event.before, after: event.after }, null, 2)}</pre>
+                </details>
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -4699,8 +6531,51 @@ function finishModal(message, setModal, setNotice, reload) {
   reload();
 }
 
+async function loadAllRows(path, query, key) {
+  const rows = [];
+  let offset = 0;
+  let total = 0;
+  do {
+    const response = await api.get(path, { ...query, limit: 100, offset });
+    const page = response[key] || [];
+    rows.push(...page);
+    total = Number(response.pagination?.total ?? rows.length);
+    offset += page.length;
+    if (!page.length) break;
+  } while (offset < total);
+  return rows;
+}
+
+function downloadTableCsv({ filename, columns, rows }) {
+  const escape = (value) => {
+    const text = value == null ? "" : String(value);
+    return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+  };
+  const csv = [
+    columns.map(escape).join(","),
+    ...rows.map((row) => row.map(escape).join(","))
+  ].join("\r\n");
+  const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 function errorMessage(error) {
   if (error instanceof ApiError && error.status === 401) return "Your session has expired. Refresh and sign in again.";
+  const issue = error instanceof ApiError && error.code === "validation_error"
+    ? error.details?.issues?.[0]
+    : null;
+  if (issue) {
+    const path = issue.path || [];
+    const row = path[0] === "rows" && Number.isInteger(path[1]) ? `Row ${path[1] + 1} ` : "";
+    const field = String(path.at(-1) || "")
+      .replace(/([a-z])([A-Z])/g, "$1 $2")
+      .replace(/^./, (letter) => letter.toUpperCase());
+    return `${row}${field ? `${field}: ` : ""}${issue.message}`;
+  }
   return error?.message || "The request could not be completed.";
 }
 
@@ -4806,6 +6681,9 @@ function nextScheduleDate(value) {
 }
 
 function recurrenceLabel(rule = {}) {
+  if (rule.type === "dates") {
+    return `${rule.dates?.length || 0} individual date${rule.dates?.length === 1 ? "" : "s"}`;
+  }
   if (rule.type === "weekly") {
     return rule.intervalWeeks === 1 ? "Weekly" : `Every ${rule.intervalWeeks} weeks`;
   }

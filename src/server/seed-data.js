@@ -9,6 +9,12 @@ export async function seed(pool, { password = "change-me-now" } = {}) {
   const organizationId = crypto.randomUUID();
   const managerId = crypto.randomUUID();
   const passwordHash = await hashPassword(password);
+  const today = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).format(new Date());
 
   await pool.query("BEGIN");
   try {
@@ -62,6 +68,16 @@ export async function seed(pool, { password = "change-me-now" } = {}) {
       "UPDATE employees SET user_id = $1 WHERE id = $2",
       [captainUserId, employeeIds[0]]
     );
+    const cleanerUserId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO users (id, organization_id, email, name, role, password_hash)
+       VALUES ($1, $2, 'cleaner@queencitymaid.local', 'Maya Collins', 'cleaner', $3)`,
+      [cleanerUserId, organizationId, passwordHash]
+    );
+    await pool.query(
+      "UPDATE employees SET user_id = $1 WHERE id = $2",
+      [cleanerUserId, employeeIds[1]]
+    );
 
     const teams = [
       ["Crown", employeeIds[0], employeeIds[1]],
@@ -77,8 +93,8 @@ export async function seed(pool, { password = "change-me-now" } = {}) {
       );
       await pool.query(
         `INSERT INTO team_members (team_id, employee_id, is_captain, effective_from)
-         VALUES ($1, $2, true, CURRENT_DATE), ($1, $3, false, CURRENT_DATE)`,
-        [teamId, captainId, cleanerId]
+         VALUES ($1, $2, true, $4), ($1, $3, false, $4)`,
+        [teamId, captainId, cleanerId, today]
       );
     }
 
@@ -137,12 +153,6 @@ export async function seed(pool, { password = "change-me-now" } = {}) {
       ]
     );
 
-    const today = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "America/New_York",
-      year: "numeric",
-      month: "2-digit",
-      day: "2-digit"
-    }).format(new Date());
     const scheduledStart = new Date(`${today}T13:00:00.000Z`);
     const bookingId = crypto.randomUUID();
     await pool.query(

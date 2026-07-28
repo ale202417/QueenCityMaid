@@ -24,8 +24,10 @@ Creates a session and records a login audit event.
 }
 ```
 
-Returns the current user and organization. Invalid credentials return `401`;
-invalid or unknown request fields return `400`.
+Returns the current user and organization. Accounts created or reset with a
+temporary password also return `mustChangePassword: true`; every business API
+route remains blocked until that password is replaced. Invalid credentials
+return `401`; invalid or unknown request fields return `400`.
 
 ### `POST /api/auth/logout`
 
@@ -41,7 +43,7 @@ organization.
 
 Requires authentication. Accepts `currentPassword` and a distinct
 `newPassword` of at least 12 characters. Other sessions for that user are
-revoked.
+revoked and any temporary-password requirement is cleared.
 
 ### `GET /api/audit-events?limit=50`
 
@@ -119,9 +121,15 @@ not exposed.
   customer cancelled, ends active or paused recurring services, cancels future
   unstarted bookings and queued reminders, and preserves prior operational and
   financial history. Repeated requests are safe.
+- `POST /api/customers/:id/reactivate`, `/pause`, and `/resume` provide
+  reversible customer lifecycle controls while retaining historical records.
 - Booking and payment reminders are queued at
   `/api/bookings/:id/reminder` and `/api/customers/:id/payment-reminder`.
-- `GET /api/notifications` lists delivery state;
+- `POST /api/customers/:id/messages` composes a consent-checked customer text.
+- `GET /api/notifications` lists delivery state, while
+  `POST /api/notifications/:id/cancel` and
+  `POST /api/notifications/:id/retry` control queued or failed delivery.
+- `GET /api/inbound-messages` lists received customer messages;
   `POST /api/notifications/send-due` runs an immediate delivery pass.
 
 ## Dispatch And Service Day
@@ -134,10 +142,13 @@ not exposed.
 - `POST /api/schedule-planner/bookings/:id/move` moves an upcoming booking to
   another crew, service day, or time block. Started and completed work is
   immutable; unavailable crews and occupied crew/time blocks are rejected.
+  Supplying no team unassigns the visit while keeping it scheduled.
 - `POST /api/schedule-planner/bookings/:id/cancel` accepts an optional `reason`
   and `applyFee`. It cancels only that visit, removes route assignments, cancels
   queued reminders, optionally creates the configured late-cancellation ledger
   charge, and leaves the customer and recurring service active.
+- `POST /api/schedule-planner/bookings/:id/restore` returns a cancelled visit
+  to an available date, crew, and time block without rewriting its history.
 - `GET /api/schedule-planner/others` calculates the next unplaced three-week,
   monthly-date, and nth-weekday occurrence and returns the last servicing crew.
   Flexible Saturday dates move to Friday and Sunday dates move to Monday.

@@ -85,7 +85,7 @@ async function create(request, cookie, path, body) {
 
 describe("manager resources", () => {
   it("manages customers, properties, and service types", async () => {
-    const { request, login } = await fixture();
+    const { pool, request, login } = await fixture();
     const { cookie } = await login("manager-a@example.com");
 
     const { customer } = await create(request, cookie, "/api/customers", {
@@ -163,6 +163,74 @@ describe("manager resources", () => {
     assert.equal(serviceDetail.body.data.serviceType.name, "Deep Cleaning");
     const serviceList = await request("/api/service-types?category=residential", { cookie });
     assert.equal(serviceList.body.data.serviceTypes.length, 1);
+
+    const recurringId = crypto.randomUUID();
+    const bookingId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO recurring_services
+       (id, organization_id, customer_id, property_id, service_type_id, status,
+        recurrence_rule, expected_duration_minutes, price_cents, starts_on)
+       VALUES ($1, $2, $3, $4, $5, 'active', $6, 120, 18000, '2099-01-05')`,
+      [
+        recurringId,
+        customer.organizationId,
+        customer.id,
+        property.id,
+        serviceType.id,
+        JSON.stringify({ type: "weekly", intervalWeeks: 1 })
+      ]
+    );
+    await pool.query(
+      `INSERT INTO bookings
+       (id, organization_id, customer_id, property_id, service_type_id,
+        recurring_service_id, status, scheduled_start, service_date,
+        expected_duration_minutes, price_cents)
+       VALUES ($1, $2, $3, $4, $5, $6, 'confirmed',
+               '2099-01-05T13:00:00Z', '2099-01-05', 120, 18000)`,
+      [
+        bookingId,
+        customer.organizationId,
+        customer.id,
+        property.id,
+        serviceType.id,
+        recurringId
+      ]
+    );
+    const unsafePause = await request(`/api/customers/${customer.id}`, {
+      method: "PATCH",
+      cookie,
+      body: { status: "paused" }
+    });
+    assert.equal(unsafePause.response.status, 409);
+    const paused = await request(`/api/customers/${customer.id}/pause`, {
+      method: "POST",
+      cookie,
+      body: {}
+    });
+    assert.equal(paused.response.status, 200, JSON.stringify(paused.body));
+    assert.equal(paused.body.data.customer.status, "paused");
+    assert.equal(paused.body.data.pausedRecurringServices, 1);
+    assert.equal(paused.body.data.cancelledBookings, 1);
+    const pausedRecords = await pool.query(
+      `SELECT
+         (SELECT status FROM recurring_services WHERE id = $1) AS recurring_status,
+         (SELECT status FROM bookings WHERE id = $2) AS booking_status`,
+      [recurringId, bookingId]
+    );
+    assert.deepEqual(pausedRecords.rows[0].recurring_status, ["paused"]);
+    assert.deepEqual(pausedRecords.rows[0].booking_status, ["cancelled"]);
+    const resumed = await request(`/api/customers/${customer.id}/resume`, {
+      method: "POST",
+      cookie,
+      body: {}
+    });
+    assert.equal(resumed.response.status, 200);
+    assert.equal(resumed.body.data.customer.status, "active");
+    const preservedPlan = await pool.query(
+      "SELECT status FROM recurring_services WHERE id = $1",
+      [recurringId]
+    );
+    assert.equal(preservedPlan.rows[0].status, "paused");
 
     const archivedProperty = await request(`/api/properties/${property.id}`, {
       method: "DELETE",
@@ -311,6 +379,45 @@ describe("manager resources", () => {
       body: {}
     });
     assert.equal(hidden.response.status, 404);
+
+    const reactivated = await request(`/api/customers/${customerId}/reactivate`, {
+      method: "POST",
+      cookie,
+      body: {}
+    });
+    assert.equal(reactivated.response.status, 200);
+    assert.equal(reactivated.body.data.customer.status, "active");
+    assert.equal(reactivated.body.data.customer.cancelledAt, null);
+    assert.equal(reactivated.body.data.customer.cancellationReason, null);
+    const preservedRecurring = await pool.query(
+      "SELECT status FROM recurring_services WHERE id = $1",
+      [recurringId]
+    );
+    const preservedBooking = await pool.query(
+      "SELECT status FROM bookings WHERE id = $1",
+      [futureBookingId]
+    );
+    assert.equal(preservedRecurring.rows[0].status, "ended");
+    assert.equal(preservedBooking.rows[0].status, "cancelled");
+
+    const repeatedReactivation = await request(`/api/customers/${customerId}/reactivate`, {
+      method: "POST",
+      cookie,
+      body: {}
+    });
+    assert.equal(repeatedReactivation.response.status, 409);
+    const reactivationDenied = await request(`/api/customers/${customerId}/reactivate`, {
+      method: "POST",
+      cookie: cleaner.cookie,
+      body: {}
+    });
+    assert.equal(reactivationDenied.response.status, 403);
+    const reactivationHidden = await request(`/api/customers/${customerId}/reactivate`, {
+      method: "POST",
+      cookie: (await login("manager-b@example.com")).cookie,
+      body: {}
+    });
+    assert.equal(reactivationHidden.response.status, 404);
   });
 
   it("manages employees, teams, availability, and quality feedback", async () => {
@@ -327,6 +434,11 @@ describe("manager resources", () => {
     });
     const employeeList = await request("/api/employees?active=true", { cookie });
     assert.ok(employeeList.body.data.employees.some(item => item.id === employee.id));
+    const fullNameSearch = await request("/api/employees?q=Taylor%20Driver", { cookie });
+    assert.deepEqual(
+      fullNameSearch.body.data.employees.map((item) => item.id),
+      [employee.id]
+    );
     const employeeUpdate = await request(`/api/employees/${employee.id}`, {
       method: "PATCH",
       cookie,
@@ -457,6 +569,12 @@ describe("manager resources", () => {
 
     const listDenied = await request("/api/customers", { cookie: cleaner.cookie });
     assert.equal(listDenied.response.status, 403);
+    const pauseDenied = await request(`/api/customers/${crypto.randomUUID()}/pause`, {
+      method: "POST",
+      cookie: cleaner.cookie,
+      body: {}
+    });
+    assert.equal(pauseDenied.response.status, 403);
     const mutationDenied = await request("/api/service-types", {
       method: "POST",
       cookie: cleaner.cookie,

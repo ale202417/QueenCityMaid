@@ -13,7 +13,10 @@ Money is always integer cents. Dates use `YYYY-MM-DD`; timestamps require an exp
 | `GET` | `/customers/:customerId/ledger` | Charges, allocated payments, credits, and balances |
 | `POST` | `/customers/:customerId/charges` | Add a service, additional-work, or cancellation charge |
 | `POST` | `/customers/:customerId/payments` | Record a payment, allocate oldest charges first, credit any excess |
-| `POST` | `/bookings/:bookingId/tips` | Record a tip and return its deterministic equal employee split |
+| `POST` | `/charges/:id/waive` | Waive an unpaid charge with a required reason |
+| `POST` | `/payments/:id/reverse` | Reverse a recorded payment and its allocations with a required reason |
+| `POST` | `/bookings/:bookingId/tips` | Record the booking's service tip and deterministic equal employee split |
+| `PATCH` | `/bookings/:bookingId/tips/:id` | Correct the booking's existing service tip |
 | `POST` | `/time-entries/:id/corrections` | Correct time and preserve before/after history with a reason |
 | `POST` | `/time-entries/:id/approve` | Approve submitted or corrected time |
 | `GET` | `/payroll-periods` | List stored payroll periods by payroll weeks |
@@ -67,6 +70,10 @@ POST /customers/:customerId/payments
 POST /bookings/:bookingId/tips
 { "amountCents": 2501, "source": "customer" }
 ```
+
+Only one service tip is stored per booking. Its cents are split
+deterministically among assigned employees, and open payroll periods
+automatically recalculate when the tip is recorded or corrected.
 
 ```json
 POST /time-entries/:id/corrections

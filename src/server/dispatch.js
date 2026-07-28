@@ -44,6 +44,10 @@ const issueResolutionSchema = z.object({
   (value) => !value.customerApproved || (value.additionalChargeCents || 0) > 0,
   { message: "Approved extra work requires a positive charge", path: ["additionalChargeCents"] }
 );
+const issueListSchema = z.object({
+  status: z.enum(["open", "resolved", "all"]).default("open"),
+  limit: z.coerce.number().int().min(1).max(100).default(50)
+}).strict();
 
 async function employeeForUser(pool, auth) {
   const result = await pool.query(
@@ -439,6 +443,36 @@ export function createDispatchRouter({ pool }) {
       });
     });
     data(res, { issue: { id, ...input } }, 201);
+  }));
+
+  router.get("/job-issues", requireRole("manager"), asyncRoute(async (req, res) => {
+    const input = validate(issueListSchema, req.query);
+    const params = [req.auth.organizationId];
+    let statusClause = "";
+    if (input.status === "open") statusClause = "AND ji.resolved_at IS NULL";
+    if (input.status === "resolved") statusClause = "AND ji.resolved_at IS NOT NULL";
+    params.push(input.limit);
+    const result = await pool.query(
+      `SELECT ji.id, ji.type, ji.description,
+              ji.customer_approved AS "customerApproved",
+              ji.additional_charge_cents AS "additionalChargeCents",
+              ji.created_at AS "createdAt", ji.resolved_at AS "resolvedAt",
+              b.id AS "bookingId",
+              COALESCE(b.service_date, CAST(b.scheduled_start AS date)) AS "serviceDate",
+              c.name AS "customerName", p.address_line1 AS "addressLine1",
+              e.first_name AS "reportedByFirstName",
+              e.last_name AS "reportedByLastName"
+       FROM job_issues ji
+       JOIN bookings b ON b.id = ji.booking_id
+       JOIN customers c ON c.id = b.customer_id
+       JOIN properties p ON p.id = b.property_id
+       LEFT JOIN employees e ON e.id = ji.reported_by_employee_id
+       WHERE ji.organization_id = $1 ${statusClause}
+       ORDER BY (ji.resolved_at IS NULL) DESC, ji.created_at DESC
+       LIMIT $2`,
+      params
+    );
+    data(res, { jobIssues: result.rows });
   }));
 
   router.patch("/job-issues/:id", requireRole("manager"), asyncRoute(async (req, res) => {

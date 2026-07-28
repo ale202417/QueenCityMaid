@@ -148,6 +148,17 @@ export function recurrenceDates(startsOn, rule, count) {
   const start = parseDateOnly(startsOn);
   const dates = [];
 
+  if (rule.type === "dates") {
+    if (!Array.isArray(rule.dates) || !rule.dates.length || rule.dates.length > 200) {
+      throw new TypeError("Individual dates must contain between 1 and 200 dates");
+    }
+    const selected = [...new Set(rule.dates.map((value) => dateOnly(parseDateOnly(value))))].sort();
+    if (selected.length !== rule.dates.length) {
+      throw new TypeError("Individual dates cannot contain duplicates");
+    }
+    return selected.filter((value) => value >= dateOnly(start)).slice(0, count);
+  }
+
   if (rule.type === "weekly") {
     if (![1, 2, 3].includes(rule.intervalWeeks)) {
       throw new TypeError("Weekly interval must be 1, 2, or 3");

@@ -39,6 +39,11 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 31 | Flexible recurrence rollover, open-slot placement, customer notes, and last-crew history | 30 | done |
 | 32 | Customer cancellation with future-service shutdown and preserved history | 31 | done |
 | 33 | Single-visit cancellation, route cleanup, reminder shutdown, and optional fee | 32 | done |
+| 34 | Permanent Playwright workflow harness, role coverage, mobile checks, and CI gate | 33 | done |
+| 35 | Individual multi-date services and scoped recurring date moves | 34 | done |
+| 36 | End-to-end manager module audit and P0-P2 repairs | 35 | done |
+| 37 | Reversible admin controls and record-level history | 36 | done |
+| 38 | Final migration, CI, deployment, and production smoke gates | 37 | in_progress |
 
 ## Decisions
 
@@ -101,6 +106,23 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 - Cancelling one visit leaves its customer and recurring plan active. The visit
   is removed from its route, its queued reminder is cancelled, and a manager may
   apply the configured late-cancellation fee to the customer ledger.
+- Individual-date services use a finite, validated list of calendar dates in
+  the existing recurring-service record. Moving one visit preserves the series;
+  moving future visits re-anchors the recurrence and eligible bookings in one
+  transaction.
+- Browser workflow tests always use a disposable in-memory database with
+  manager, captain, and cleaner accounts. Production records are never copied
+  into automated test runs.
+- New and reset accounts must replace their temporary password before any
+  business endpoint is available. Completing that change revokes the temporary
+  credential and clears the requirement.
+- Service tips are stored once per booking, split deterministically across the
+  assigned cleaners, and included automatically in open payroll periods.
+  Manager-entered payroll tips remain separate employee-specific adjustments.
+- Incorrect payments, unpaid charges, and expenses are corrected through
+  reversal, waiver, and void records rather than deleting financial history.
+- Every release runs both clean-install migration tests and a PostgreSQL upgrade
+  from migration 012 with existing operational and financial records.
 
 ## Verification
 
@@ -168,6 +190,25 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   recurring-plan preservation, duplicate protection, manager permissions, and
   organization isolation pass regression tests. Full suite: 60 passing tests;
   production build: passing.
+- Individual multi-date creation, flexible-schedule advancement, single-visit
+  moves, recurring future moves, crew conflicts, customer frequency updates,
+  and atomic rollback pass regression tests. Full server suite: 63 passing.
+- Playwright verifies manager/captain/cleaner sign-in and permissions, all
+  manager navigation, session refresh and sign-out, mobile navigation without
+  horizontal overflow, and the full multi-date create/place/edit workflow.
+  Browser suite: 5 passing; production build: passing.
+- Complete API regression suite: 68 passing tests.
+- Real PostgreSQL 18 previous-release upgrade through migration 013: passing
+  with users, bookings, charges, payments, expenses, and tips preserved.
+- Complete Playwright workflow suite: 23 passing tests across manager, captain,
+  cleaner, desktop, and 390px mobile projects.
+- Filtered full-record CSV exports, lead ownership and lifecycle, quote
+  revisions and decisions, customer and property lifecycle, employee/team/
+  account deactivation and reactivation, schedule duplication/unassignment/
+  restoration, recurring-plan controls, payment correction, charge waiver,
+  service tips, message retry, expense correction, imports, and audit history:
+  passing in the browser suite.
+- Production dependency audit at high severity: 0 known vulnerabilities.
 
 ## Definition of Done
 

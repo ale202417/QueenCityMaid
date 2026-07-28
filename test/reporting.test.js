@@ -190,9 +190,19 @@ describe("dashboard, reports, and settings", () => {
       })
     });
     assert.equal(expense.response.status, 201, JSON.stringify(expense.body));
+    const expenseId = expense.body.data.expense.id;
+    const editedExpense = await request(`/api/expenses/${expenseId}`, {
+      method: "PATCH",
+      body: JSON.stringify({
+        description: "Cleaning and paper supplies",
+        amountCents: 5500
+      })
+    });
+    assert.equal(editedExpense.response.status, 200, JSON.stringify(editedExpense.body));
     const expenseList = await request("/api/expenses?from=2026-07-01&to=2026-07-31");
     assert.equal(expenseList.response.status, 200);
     assert.equal(expenseList.body.data.expenses.length, 1);
+    assert.equal(expenseList.body.data.expenses[0].amountCents, 5500);
 
     const monthly = await request(
       "/api/reports/financial?kind=monthly&from=2026-07-01&to=2026-07-31"
@@ -202,9 +212,9 @@ describe("dashboard, reports, and settings", () => {
       revenueCents: 30000,
       chargedCents: 30000,
       wagesCents: 10000,
-      operatingExpensesCents: 5000,
-      totalExpensesCents: 15000,
-      profitCents: 15000,
+      operatingExpensesCents: 5500,
+      totalExpensesCents: 15500,
+      profitCents: 14500,
       outstandingCents: 0,
       collectionRate: 1,
       averageRevenuePerServiceCents: 30000
@@ -216,9 +226,26 @@ describe("dashboard, reports, and settings", () => {
     });
     assert.deepEqual(monthly.body.data.expenseBreakdown, [
       { category: "wages", amountCents: 10000 },
-      { category: "supplies", amountCents: 5000 }
+      { category: "supplies", amountCents: 5500 }
     ]);
     assert.equal(monthly.body.data.services.total, 1);
+
+    const voidedExpense = await request(`/api/expenses/${expenseId}/void`, {
+      method: "POST",
+      body: JSON.stringify({ reason: "Entered against the wrong business" })
+    });
+    assert.equal(voidedExpense.response.status, 200, JSON.stringify(voidedExpense.body));
+    assert.equal(voidedExpense.body.data.expense.status, "voided");
+    const correctedMonthly = await request(
+      "/api/reports/financial?kind=monthly&from=2026-07-01&to=2026-07-31"
+    );
+    assert.equal(correctedMonthly.body.data.finances.operatingExpensesCents, 0);
+    assert.equal(correctedMonthly.body.data.finances.profitCents, 20000);
+    const repeatedVoid = await request(`/api/expenses/${expenseId}/void`, {
+      method: "POST",
+      body: JSON.stringify({ reason: "Repeated correction" })
+    });
+    assert.equal(repeatedVoid.response.status, 409);
 
     const payroll = await request(
       `/api/reports/financial?kind=payroll&from=2026-07-06&to=2026-07-19&payrollPeriodId=${ids.payroll}`

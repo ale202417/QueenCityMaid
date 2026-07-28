@@ -30,6 +30,13 @@ Cleaner route testing:
 
 - Email: `captain@queencitymaid.local`
 - Password: `manager123!`
+- Email: `cleaner@queencitymaid.local`
+- Password: `manager123!`
+
+Run `npm run test:all` for the API suite, production build, and browser-level
+workflow checks. Run `npm run test:migration-upgrade` with a PostgreSQL owner
+connection to verify the previous-release upgrade path. Browser artifacts for
+failed runs are written under `.cache/`.
 
 For a production-style local run, execute `npm run build` and then
 `npm run server`; the server hosts both the web app and API.
