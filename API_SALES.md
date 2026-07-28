@@ -80,6 +80,10 @@ Supported recurrence rules:
 
 `weekday` uses `0` for Sunday through `6` for Saturday.
 
+Creating or updating a recurring service keeps the customer's displayed
+frequency synchronized. Updating `startsOn` re-anchors the next occurrence;
+the flexible schedule reflects the new date immediately.
+
 ## Bookings
 
 | Method | Path | Purpose |

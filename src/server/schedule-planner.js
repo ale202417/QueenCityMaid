@@ -30,7 +30,6 @@ const moveInput = z.object({
 
 const placeInput = z.object({
   week: weekKey,
-  weekday: z.number().int().min(1).max(6).optional(),
   teamId: uuid,
   startTime: block,
   reference: dateOnly.optional()
@@ -72,8 +71,26 @@ function localTime(value, timeZone) {
   return `${values.hour}:${values.minute}`;
 }
 
+function todayInTimezone(timeZone) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit"
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
 function addDays(value, days) {
   return isoDate(new Date(date(value).getTime() + days * DAY_MS));
+}
+
+function nearestWeekday(value) {
+  const weekday = date(value).getUTCDay();
+  if (weekday === 6) return addDays(value, -1);
+  if (weekday === 0) return addDays(value, 1);
+  return value;
 }
 
 function mondayFor(value) {
@@ -128,6 +145,11 @@ function occurrencesBetween(startsOn, recurrenceRule, from, to) {
 function nextOccurrence(startsOn, recurrenceRule, reference, booked) {
   return recurrenceDates(startsOn, recurrenceRule, 500)
     .find((value) => value >= reference && !booked.has(value)) || null;
+}
+
+function nextFlexibleOccurrence(startsOn, recurrenceRule, reference, booked) {
+  return recurrenceDates(startsOn, recurrenceRule, 500)
+    .find((value) => nearestWeekday(value) >= reference && !booked.has(value)) || null;
 }
 
 async function transaction(pool, work) {
@@ -267,6 +289,26 @@ async function assignBooking(client, organizationId, bookingId, teamId, serviceD
   }
 
   const team = await activeTeam(client, organizationId, teamId, serviceDate);
+  const booking = await client.query(
+    `SELECT scheduled_start, expected_duration_minutes
+     FROM bookings WHERE id = $1 AND organization_id = $2`,
+    [bookingId, organizationId]
+  );
+  const occupied = await client.query(
+    `SELECT 1
+     FROM route_stops rs
+     JOIN routes r ON r.id = rs.route_id
+     JOIN bookings b ON b.id = rs.booking_id
+     WHERE rs.organization_id = $1 AND r.team_id = $2
+       AND r.service_date = $3 AND b.scheduled_start = $4
+       AND b.id <> $5
+       AND b.status NOT IN ('cancelled', 'rescheduled', 'unable_to_complete')
+     LIMIT 1`,
+    [organizationId, teamId, serviceDate, booking.rows[0].scheduled_start, bookingId]
+  );
+  if (occupied.rowCount) {
+    throw new HttpError(409, "schedule_conflict", "That crew already has a service in this time block");
+  }
   let route = await client.query(
     `SELECT id FROM routes
      WHERE organization_id = $1 AND team_id = $2 AND service_date = $3`,
@@ -285,11 +327,6 @@ async function assignBooking(client, organizationId, bookingId, teamId, serviceD
   const count = await client.query(
     "SELECT COUNT(*) AS count FROM route_stops WHERE route_id = $1",
     [routeId]
-  );
-  const booking = await client.query(
-    `SELECT scheduled_start, expected_duration_minutes
-     FROM bookings WHERE id = $1 AND organization_id = $2`,
-    [bookingId, organizationId]
   );
   const arrival = booking.rows[0].scheduled_start;
   const departure = new Date(
@@ -370,6 +407,95 @@ async function recurringRows(client, organizationId) {
   )).rows;
 }
 
+async function flexibleServices(client, organizationId, reference) {
+  const rows = await recurringRows(client, organizationId);
+  const bookings = await client.query(
+    `SELECT recurring_service_id AS "recurringServiceId",
+            recurrence_due_date AS "dueDate",
+            COALESCE(service_date, CAST(scheduled_start AS date)) AS "serviceDate",
+            status
+     FROM bookings
+     WHERE organization_id = $1 AND recurring_service_id IS NOT NULL
+       AND recurrence_due_date IS NOT NULL`,
+    [organizationId]
+  );
+  const booked = new Map();
+  const pending = new Set();
+  for (const booking of bookings.rows) {
+    if (!booked.has(booking.recurringServiceId)) {
+      booked.set(booking.recurringServiceId, new Set());
+    }
+    booked.get(booking.recurringServiceId).add(databaseDate(booking.dueDate));
+    if (databaseDate(booking.serviceDate) >= reference
+      && !["cancelled", "rescheduled", "unable_to_complete"].includes(booking.status)) {
+      pending.add(booking.recurringServiceId);
+    }
+  }
+  const details = await client.query(
+    `SELECT rs.id, c.name AS "customerName", c.internal_notes AS "internalNotes",
+            p.address_line1 AS "addressLine1", p.address_line2 AS "addressLine2",
+            p.city, p.postal_code AS "postalCode", st.name AS "serviceName",
+            t.name AS "preferredTeamName"
+     FROM recurring_services rs
+     JOIN customers c ON c.id = rs.customer_id
+     JOIN properties p ON p.id = rs.property_id
+     JOIN service_types st ON st.id = rs.service_type_id
+     LEFT JOIN teams t ON t.id = rs.preferred_team_id
+     WHERE rs.organization_id = $1`,
+    [organizationId]
+  );
+  const lastTeams = await client.query(
+    `SELECT b.recurring_service_id AS "recurringServiceId",
+            t.name AS "teamName",
+            COALESCE(b.service_date, CAST(b.scheduled_start AS date)) AS "serviceDate"
+     FROM bookings b
+     JOIN route_stops rs ON rs.booking_id = b.id
+     JOIN routes r ON r.id = rs.route_id
+     JOIN teams t ON t.id = r.team_id
+     WHERE b.organization_id = $1 AND b.recurring_service_id IS NOT NULL
+       AND COALESCE(b.service_date, CAST(b.scheduled_start AS date)) < $2
+       AND b.status NOT IN ('cancelled', 'rescheduled')
+     ORDER BY COALESCE(b.service_date, CAST(b.scheduled_start AS date)) DESC,
+              b.scheduled_start DESC`,
+    [organizationId, reference]
+  );
+  const lastTeamMap = new Map();
+  for (const item of lastTeams.rows) {
+    if (!lastTeamMap.has(item.recurringServiceId)) {
+      lastTeamMap.set(item.recurringServiceId, item.teamName);
+    }
+  }
+  const detailMap = new Map(details.rows.map((item) => [item.id, item]));
+  return rows
+    .filter((item) => isOtherRule(rule(item)) && !pending.has(item.id))
+    .map((item) => {
+      const recurrenceRule = rule(item);
+      const nextDueDate = nextFlexibleOccurrence(
+        databaseDate(item.starts_on),
+        recurrenceRule,
+        reference,
+        booked.get(item.id) || new Set()
+      );
+      const nextServiceDate = nextDueDate ? nearestWeekday(nextDueDate) : null;
+      return {
+        ...detailMap.get(item.id),
+        id: item.id,
+        recurrenceRule,
+        nextDueDate,
+        nextServiceDate,
+        week: nextServiceDate ? labelForWeek(mondayFor(nextServiceDate)) : null,
+        lastTeamName: lastTeamMap.get(item.id) || null,
+        preferredTeamId: item.preferred_team_id,
+        preferredStartTime: item.preferred_start_time,
+        expectedDurationMinutes: item.expected_duration_minutes,
+        priceCents: item.price_cents,
+        billingType: item.billing_type,
+        billingRateCents: item.billing_rate_cents,
+        specialInstructions: item.special_instructions
+      };
+    });
+}
+
 async function syncAlternatingWeeks(pool, auth, reference) {
   return transaction(pool, async (client) => {
     const currentMonday = mondayFor(reference);
@@ -443,16 +569,22 @@ async function planner(pool, organizationId, key, reference) {
     ),
     timezone(pool, organizationId)
   ]);
+  const flexible = await flexibleServices(
+    pool,
+    organizationId,
+    reference > weekStart ? reference : weekStart
+  );
   const days = calendarDays(weekStart).map((item) => ({
     date: item.date,
     dayName: item.name,
+    flexibleServices: flexible.filter((service) => service.nextServiceDate === item.date),
     bookings: bookings.rows.filter(
       (booking) => databaseDate(booking.serviceDate) === item.date
     ).map((booking) => ({
       ...booking,
       serviceDate: databaseDate(booking.serviceDate),
       startTime: localTime(booking.scheduledStart, organizationTimezone),
-      canMove: databaseDate(booking.serviceDate) >= referenceDate()
+      canMove: databaseDate(booking.serviceDate) >= reference
         && !["in_progress", "completed"].includes(booking.status)
     }))
   }));
@@ -505,7 +637,8 @@ export function createScheduleRouter({ pool }) {
       const beforeDate = databaseDate(
         before.rows[0].service_date || before.rows[0].scheduled_start
       );
-      if (beforeDate < referenceDate()) {
+      const today = todayInTimezone(await timezone(client, req.auth.organizationId));
+      if (beforeDate < today) {
         throw new HttpError(409, "invalid_state", "Past service cannot be moved");
       }
       const scheduledStart = zonedDateTime(
@@ -543,60 +676,9 @@ export function createScheduleRouter({ pool }) {
   router.get("/schedule-planner/others", asyncRoute(async (req, res) => {
     const input = validate(z.object({ reference: dateOnly.optional() }).strict(), req.query);
     const reference = referenceDate(input.reference);
-    const rows = await recurringRows(pool, req.auth.organizationId);
-    const bookings = await pool.query(
-      `SELECT recurring_service_id AS "recurringServiceId",
-              recurrence_due_date AS "dueDate"
-       FROM bookings
-       WHERE organization_id = $1 AND recurring_service_id IS NOT NULL
-         AND recurrence_due_date IS NOT NULL
-         AND status NOT IN ('cancelled', 'rescheduled')`,
-      [req.auth.organizationId]
-    );
-    const booked = new Map();
-    for (const booking of bookings.rows) {
-      if (!booked.has(booking.recurringServiceId)) {
-        booked.set(booking.recurringServiceId, new Set());
-      }
-      booked.get(booking.recurringServiceId).add(databaseDate(booking.dueDate));
-    }
-    const details = await pool.query(
-      `SELECT rs.id, c.name AS "customerName", p.address_line1 AS "addressLine1",
-              p.address_line2 AS "addressLine2", p.city, p.postal_code AS "postalCode",
-              st.name AS "serviceName", t.name AS "preferredTeamName"
-       FROM recurring_services rs
-       JOIN customers c ON c.id = rs.customer_id
-       JOIN properties p ON p.id = rs.property_id
-       JOIN service_types st ON st.id = rs.service_type_id
-       LEFT JOIN teams t ON t.id = rs.preferred_team_id
-       WHERE rs.organization_id = $1`,
-      [req.auth.organizationId]
-    );
-    const detailMap = new Map(details.rows.map((item) => [item.id, item]));
-    const others = rows.filter((item) => isOtherRule(rule(item))).map((item) => {
-      const recurrenceRule = rule(item);
-      const nextServiceDate = nextOccurrence(
-        databaseDate(item.starts_on),
-        recurrenceRule,
-        reference,
-        booked.get(item.id) || new Set()
-      );
-      return {
-        ...detailMap.get(item.id),
-        id: item.id,
-        recurrenceRule,
-        nextDueDate: nextServiceDate,
-        week: nextServiceDate ? labelForWeek(mondayFor(nextServiceDate)) : null,
-        preferredTeamId: item.preferred_team_id,
-        preferredStartTime: item.preferred_start_time,
-        expectedDurationMinutes: item.expected_duration_minutes,
-        priceCents: item.price_cents,
-        billingType: item.billing_type,
-        billingRateCents: item.billing_rate_cents,
-        specialInstructions: item.special_instructions
-      };
+    data(res, {
+      services: await flexibleServices(pool, req.auth.organizationId, reference)
     });
-    data(res, { services: others });
   }));
 
   router.post("/schedule-planner/others/:id/place", asyncRoute(async (req, res) => {
@@ -618,20 +700,31 @@ export function createScheduleRouter({ pool }) {
         throw new HttpError(409, "invalid_schedule", "This service belongs in Schedule A or B");
       }
       const existing = await client.query(
-        `SELECT recurrence_due_date AS "dueDate" FROM bookings
+        `SELECT recurrence_due_date AS "dueDate",
+                COALESCE(service_date, CAST(scheduled_start AS date)) AS "serviceDate",
+                status
+         FROM bookings
          WHERE organization_id = $1 AND recurring_service_id = $2
-           AND recurrence_due_date IS NOT NULL
-           AND status NOT IN ('cancelled', 'rescheduled')`,
+           AND recurrence_due_date IS NOT NULL`,
         [req.auth.organizationId, recurringId]
       );
-      const dueDate = nextOccurrence(
+      if (existing.rows.some((item) =>
+        databaseDate(item.serviceDate) >= reference
+        && !["cancelled", "rescheduled", "unable_to_complete"].includes(item.status)
+      )) {
+        throw new HttpError(
+          409, "occurrence_pending", "This recurring service already has an upcoming visit"
+        );
+      }
+      const dueDate = nextFlexibleOccurrence(
         databaseDate(recurring.starts_on),
         recurrenceRule,
         reference,
         new Set(existing.rows.map((item) => databaseDate(item.dueDate)))
       );
       if (!dueDate) throw new HttpError(409, "no_occurrence", "No future service date is available");
-      const dueWeek = labelForWeek(mondayFor(dueDate));
+      const serviceDate = nearestWeekday(dueDate);
+      const dueWeek = labelForWeek(mondayFor(serviceDate));
       if (dueWeek !== input.week) {
         throw new HttpError(
           409,
@@ -639,9 +732,6 @@ export function createScheduleRouter({ pool }) {
           `This occurrence lands in Schedule ${dueWeek}`
         );
       }
-      const dueWeekStart = mondayFor(dueDate);
-      const defaultWeekday = date(dueDate).getUTCDay() || 6;
-      const serviceDate = addDays(dueWeekStart, (input.weekday || defaultWeekday) - 1);
       const bookingId = await insertRecurringBooking(
         client, req.auth.organizationId, recurring, dueDate, serviceDate, input.startTime
       );
@@ -649,10 +739,10 @@ export function createScheduleRouter({ pool }) {
       const routeId = await assignBooking(
         client, req.auth.organizationId, bookingId, input.teamId, serviceDate
       );
-      const nextDueDate = nextOccurrence(
+      const nextDueDate = nextFlexibleOccurrence(
         databaseDate(recurring.starts_on),
         recurrenceRule,
-        reference,
+        addDays(serviceDate, 1),
         new Set([...existing.rows.map((item) => databaseDate(item.dueDate)), dueDate])
       );
       await recordAudit(client, req.auth, {
@@ -670,7 +760,8 @@ export function createScheduleRouter({ pool }) {
           startTime: input.startTime,
           routeId
         },
-        nextDueDate
+        nextDueDate,
+        nextServiceDate: nextDueDate ? nearestWeekday(nextDueDate) : null
       };
     });
     data(res, placed, 201);

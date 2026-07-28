@@ -4,6 +4,7 @@ import express from "express";
 import { afterEach, describe, it } from "node:test";
 import { requireRole } from "../src/server/auth.js";
 import { errorHandler, notFound } from "../src/server/http.js";
+import { createSalesRouter } from "../src/server/sales.js";
 import { createScheduleRouter } from "../src/server/schedule-planner.js";
 import { testPool } from "./helpers.js";
 
@@ -192,6 +193,7 @@ async function fixture(role = "manager") {
     next();
   });
   app.use("/api", requireRole("manager"), createScheduleRouter({ pool }));
+  app.use("/api", requireRole("manager"), createSalesRouter({ pool }));
   app.use(notFound);
   app.use(errorHandler);
 
@@ -336,7 +338,7 @@ describe("schedule planner API", () => {
       method: "POST",
       body: { teamId: id.teamB, date: "2026-07-28", startTime: "10:30" }
     });
-    assert.equal(moved.response.status, 200);
+    assert.equal(moved.response.status, 200, JSON.stringify(moved.body));
     assert.deepEqual(
       {
         id: moved.body.data.booking.id,
@@ -362,6 +364,21 @@ describe("schedule planner API", () => {
       route.rows.map((row) => ({ ...row, serviceDate: ymd(row.serviceDate) })),
       [{ teamId: id.teamB, serviceDate: "2026-07-28" }]
     );
+
+    const biweekly = await pool.query(
+      `SELECT id FROM bookings
+       WHERE organization_id = $1 AND recurring_service_id = $2`,
+      [id.organizationA, id.biweeklyService]
+    );
+    const conflict = await request(
+      `/api/schedule-planner/bookings/${biweekly.rows[0].id}/move`,
+      {
+        method: "POST",
+        body: { teamId: id.teamB, date: "2026-07-28", startTime: "10:30" }
+      }
+    );
+    assert.equal(conflict.response.status, 409);
+    assert.equal(conflict.body.error.code, "schedule_conflict");
 
     const invalidBlock = await request(`/api/schedule-planner/bookings/${bookingId}/move`, {
       method: "POST",
@@ -395,7 +412,7 @@ describe("schedule planner API", () => {
     assert.equal(completed.body.error.code, "invalid_state");
   });
 
-  it("keeps a Sunday recurrence due date while placing service on Saturday", async () => {
+  it("keeps a Sunday fixed recurrence due date while placing service on Saturday", async () => {
     const { pool, id, request } = await fixture();
     const sundayService = crypto.randomUUID();
     await pool.query(
@@ -458,21 +475,28 @@ describe("schedule planner API", () => {
       }
     );
     assert.equal(byId[id.monthlyService].nextDueDate, "2026-08-15");
+    assert.equal(byId[id.monthlyService].nextServiceDate, "2026-08-14");
     assert.equal(byId[id.nthService].nextDueDate, "2026-08-11");
+
+    const dueWeek = await request(
+      "/api/schedule-planner?week=A&reference=2026-08-10"
+    );
+    const monday = dueWeek.body.data.days.find((day) => day.date === "2026-08-10");
+    assert.equal(monday.flexibleServices[0].id, id.threeWeekService);
+    assert.equal(monday.flexibleServices[0].lastTeamName, null);
 
     const placed = await request(`/api/schedule-planner/others/${id.threeWeekService}/place`, {
       method: "POST",
       body: {
         reference: "2026-07-27",
         week: "A",
-        weekday: 2,
         teamId: id.teamA,
         startTime: "13:00"
       }
     });
     assert.equal(placed.response.status, 201);
     assert.equal(placed.body.data.booking.recurrenceDueDate, "2026-08-10");
-    assert.equal(placed.body.data.booking.serviceDate, "2026-08-11");
+    assert.equal(placed.body.data.booking.serviceDate, "2026-08-10");
     assert.equal(placed.body.data.booking.teamId, id.teamA);
     assert.equal(placed.body.data.nextDueDate, "2026-08-31");
 
@@ -487,8 +511,31 @@ describe("schedule planner API", () => {
       [{ dueDate: "2026-08-10" }]
     );
     const advanced = await request("/api/schedule-planner/others?reference=2026-07-27");
-    const service = advanced.body.data.services.find((item) => item.id === id.threeWeekService);
+    assert.ok(!advanced.body.data.services.some((item) => item.id === id.threeWeekService));
+    const afterService = await request("/api/schedule-planner/others?reference=2026-08-11");
+    const service = afterService.body.data.services.find((item) => item.id === id.threeWeekService);
     assert.equal(service.nextDueDate, "2026-08-31");
+    assert.equal(service.lastTeamName, "Crown Crew");
+  });
+
+  it("shows a manager-updated next date in the flexible schedule", async () => {
+    const { id, request } = await fixture();
+
+    const updated = await request(`/api/recurring-services/${id.threeWeekService}`, {
+      method: "PATCH",
+      body: {
+        startsOn: "2026-07-30",
+        recurrenceRule: { type: "weekly", intervalWeeks: 3 }
+      }
+    });
+    assert.equal(updated.response.status, 200);
+    assert.equal(updated.body.data.nextDates[0], "2026-07-30");
+
+    const others = await request("/api/schedule-planner/others?reference=2026-07-27");
+    assert.equal(others.response.status, 200);
+    const service = others.body.data.services.find((item) => item.id === id.threeWeekService);
+    assert.equal(service.nextDueDate, "2026-07-30");
+    assert.equal(service.nextServiceDate, "2026-07-30");
   });
 
   it("returns past services with the servicing team and employee names", async () => {

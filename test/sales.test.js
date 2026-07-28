@@ -248,6 +248,11 @@ describe("sales API", () => {
       recurringCreated.body.data.nextDates.slice(0, 3),
       ["2026-08-03", "2026-08-17", "2026-08-31"]
     );
+    const customerFrequency = await pool.query(
+      "SELECT service_frequency FROM customers WHERE id = $1",
+      [ids.customerA]
+    );
+    assert.equal(customerFrequency.rows[0].service_frequency, "biweekly");
     const recurringId = recurringCreated.body.data.recurringService.id;
     const recurringDetail = await request(`/api/recurring-services/${recurringId}`);
     assert.equal(recurringDetail.response.status, 200);
@@ -257,6 +262,19 @@ describe("sales API", () => {
     });
     assert.equal(recurringPaused.response.status, 200);
     assert.equal(recurringPaused.body.data.recurringService.status, "paused");
+    const recurringReanchored = await request(`/api/recurring-services/${recurringId}`, {
+      method: "PATCH",
+      body: {
+        startsOn: "2026-09-02",
+        recurrenceRule: { type: "weekly", intervalWeeks: 2 }
+      }
+    });
+    assert.equal(recurringReanchored.response.status, 200);
+    assert.equal(
+      String(recurringReanchored.body.data.recurringService.startsOn).slice(0, 10),
+      "2026-09-02"
+    );
+    assert.equal(recurringReanchored.body.data.nextDates[0], "2026-09-02");
     const recurringListed = await request("/api/recurring-services?status=paused");
     assert.equal(recurringListed.response.status, 200);
     assert.equal(recurringListed.body.data.recurringServices.length, 1);

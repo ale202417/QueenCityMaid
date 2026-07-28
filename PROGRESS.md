@@ -36,6 +36,7 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 28 | Server-side record pagination and search, property archiving, and scheduled-service editing | 27 | done |
 | 29 | Recurring booking service-type override for an individual scheduled visit | 28 | done |
 | 30 | Scoped recurring-service edits for one visit or all eligible future visits | 29 | done |
+| 31 | Flexible recurrence rollover, open-slot placement, customer notes, and last-crew history | 30 | done |
 
 ## Decisions
 
@@ -66,8 +67,12 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   derived from a stable Monday anchor. Weekly work appears in both schedules;
   biweekly work stays on its calculated A or B week.
 - Three-week, monthly date, and nth-weekday services remain in Others with a
-  calculated next service date. Placing one changes its next occurrence rather
-  than changing the customer's long-term recurrence pattern.
+  calculated next service date. Saturday due dates move to Friday and Sunday
+  due dates move to Monday. Placing a visit keeps it out of Others until its
+  service date passes, then the next occurrence becomes available.
+- Weekly work remains assigned in both A/B schedules and biweekly work remains
+  on its alternating week. Flexible visits appear on their calculated A/B day
+  before placement and can only use an open crew/time block.
 - The four operational start blocks are 8:00 AM, 10:30 AM, 1:00 PM, and
   3:00 PM. Managers may move upcoming work between active crews and blocks;
   completed and in-progress work remains immutable history.
@@ -143,6 +148,10 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   recurring plan and pass reference, permission, and regression tests.
 - Scoped recurring-service edits update the plan and eligible future visits in
   one transaction while preserving completed and otherwise closed history.
+- Flexible recurrence dates, manager-set next dates, weekday adjustment,
+  open-slot conflict protection, post-service rollover, last servicing crew,
+  customer frequency synchronization, and cross-module schedule reads pass
+  regression tests. Full suite: 58 passing tests; production build: passing.
 
 ## Definition of Done
 

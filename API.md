@@ -125,14 +125,17 @@ not exposed.
 - `POST /api/schedule-planner/sync` safely creates missing weekly and biweekly
   booking occurrences for the current Schedule A/B cycle.
 - `GET /api/schedule-planner?week=A|B&reference=YYYY-MM-DD` returns the
-  Monday-through-Saturday crew board and four supported time blocks.
+  Monday-through-Saturday crew board, four supported time blocks, and flexible
+  visits due on each day but not yet assigned to a crew.
 - `POST /api/schedule-planner/bookings/:id/move` moves an upcoming booking to
   another crew, service day, or time block. Started and completed work is
-  immutable, and unavailable crews are rejected.
+  immutable; unavailable crews and occupied crew/time blocks are rejected.
 - `GET /api/schedule-planner/others` calculates the next unplaced three-week,
-  monthly-date, and nth-weekday occurrence.
+  monthly-date, and nth-weekday occurrence and returns the last servicing crew.
+  Flexible Saturday dates move to Friday and Sunday dates move to Monday.
 - `POST /api/schedule-planner/others/:id/place` places one calculated
-  occurrence into its automatically determined Schedule A or B week.
+  occurrence on its calculated date in Schedule A or B. A placed occurrence
+  stays hidden until its service date passes, when the next date rolls forward.
 - `GET /api/schedule-planner/history?from=YYYY-MM-DD&to=YYYY-MM-DD` returns
   prior services with the assigned crew and employee names.
 - `GET /api/dispatch?date=YYYY-MM-DD` lists the manager's bookings and current

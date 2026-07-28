@@ -152,6 +152,15 @@ const recurringUpdate = recurringBase.partial().extend({
   message: "At least one field is required"
 }).superRefine(validateBilling);
 
+function customerFrequencyForRule(rule) {
+  if (rule.type === "weekly") {
+    if (rule.intervalWeeks === 1) return "weekly";
+    if (rule.intervalWeeks === 2) return "biweekly";
+    return "other";
+  }
+  return "monthly";
+}
+
 const bookingFields = z.object({
   customerId: uuid,
   propertyId: uuid,
@@ -892,6 +901,15 @@ function recurringRoutes(router, pool) {
           input.startsOn, input.restartOn || null
         ]
       );
+      await client.query(
+        `UPDATE customers SET service_frequency = $1, updated_at = now()
+         WHERE id = $2 AND organization_id = $3`,
+        [
+          customerFrequencyForRule(input.recurrenceRule),
+          input.customerId,
+          req.auth.organizationId
+        ]
+      );
       await recordAudit(client, req.auth, {
         entityType: "recurringService", entityId: result.rows[0].id, action: "create",
         after: apiRow(result.rows[0])
@@ -962,6 +980,15 @@ function recurringRoutes(router, pool) {
          WHERE id = $${values.length - 1} AND organization_id = $${values.length}
          RETURNING *`,
         values
+      );
+      await client.query(
+        `UPDATE customers SET service_frequency = $1, updated_at = now()
+         WHERE id = $2 AND organization_id = $3`,
+        [
+          customerFrequencyForRule(merged.recurrenceRule),
+          merged.customerId,
+          req.auth.organizationId
+        ]
       );
       await recordAudit(client, req.auth, {
         entityType: "recurringService", entityId: id, action: "update",

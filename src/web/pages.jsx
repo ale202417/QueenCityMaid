@@ -685,7 +685,13 @@ function CustomersPage() {
                   </div>
                   <div data-label="Status"><StatusBadge status={customer.status} /></div>
                   <div data-label="Preferences">
-                    <span>{customer.serviceFrequency ? capitalize(customer.serviceFrequency) : "Frequency not set"}</span>
+                    <span className={customer.serviceFrequency === "other" ? "customer-frequency-note" : ""}>
+                      {customer.serviceFrequency === "other"
+                        ? customer.internalNotes || "Other schedule details not set"
+                        : customer.serviceFrequency
+                          ? capitalize(customer.serviceFrequency)
+                          : "Frequency not set"}
+                    </span>
                     <small>{paymentMethodLabel(customer.paymentMethod)}</small>
                   </div>
                   <div data-label="Properties">
@@ -2090,6 +2096,7 @@ function SchedulePage() {
             onDayChange={setDayIndex}
             onEdit={(booking) => setModal({ type: "edit-booking", booking })}
             onMove={(booking) => setModal({ type: "move", booking })}
+            onPlaceFlexible={(service) => setModal({ type: "place", service })}
             onTeamChange={setTeamId}
           />
         )}
@@ -2098,6 +2105,7 @@ function SchedulePage() {
             reference={reference}
             services={resource.data?.services || []}
             onPlace={(service) => setModal({ type: "place", service })}
+            onSetNextDate={(service) => setModal({ type: "next-service-date", service })}
             onReferenceChange={setReference}
           />
         )}
@@ -2163,13 +2171,22 @@ function SchedulePage() {
         </Modal>
       )}
       {modal?.type === "place" && (
-        <Modal title={`Place ${modal.service.customerName}`} description={`This visit falls in Schedule ${modal.service.week}.`} onClose={() => setModal(null)}>
+        <Modal title={`Place ${modal.service.customerName}`} description={`${shortDate(modal.service.nextServiceDate)} in Schedule ${modal.service.week}.`} onClose={() => setModal(null)}>
           <PlaceOtherForm
             reference={reference}
             service={modal.service}
-            teams={teams}
             onCancel={() => setModal(null)}
             onSaved={() => changed("Recurring visit placed on the crew schedule.")}
+          />
+        </Modal>
+      )}
+      {modal?.type === "next-service-date" && (
+        <Modal title={`Set next service - ${modal.service.customerName}`} onClose={() => setModal(null)}>
+          <NextServiceDateForm
+            reference={reference}
+            service={modal.service}
+            onCancel={() => setModal(null)}
+            onSaved={() => changed("Next service date updated.")}
           />
         </Modal>
       )}
@@ -2186,6 +2203,7 @@ function WeeklySchedule({
   onDayChange,
   onEdit,
   onMove,
+  onPlaceFlexible,
   onTeamChange
 }) {
   if (!plan?.days?.length) {
@@ -2219,6 +2237,26 @@ function WeeklySchedule({
       </div>
 
       <div className="crew-schedule">
+        {(selectedDay?.flexibleServices || []).length > 0 && (
+          <div className="flexible-due-list">
+            <strong>Unplaced flexible visits</strong>
+            {selectedDay.flexibleServices.map((service) => (
+              <article key={service.id}>
+                <div>
+                  <span>{service.customerName}</span>
+                  <small>{service.addressLine1} · {recurrenceLabel(service.recurrenceRule)}</small>
+                </div>
+                <div>
+                  <small>Last crew</small>
+                  <span>{service.lastTeamName || "No prior crew"}</span>
+                </div>
+                <button className="text-button" type="button" onClick={() => onPlaceFlexible(service)}>
+                  Place visit
+                </button>
+              </article>
+            ))}
+          </div>
+        )}
         <div className="crew-tabs" role="tablist" aria-label="Cleaning crews">
           {crewTabs.map((team) => (
             <button
@@ -2290,7 +2328,13 @@ function TimeBlockSchedule({ bookings, onEdit, onMove }) {
   );
 }
 
-function OtherServices({ reference, services, onPlace, onReferenceChange }) {
+function OtherServices({
+  reference,
+  services,
+  onPlace,
+  onSetNextDate,
+  onReferenceChange
+}) {
   return (
     <>
       <div className="toolbar">
@@ -2302,15 +2346,19 @@ function OtherServices({ reference, services, onPlace, onReferenceChange }) {
         <StatePanel title="No flexible recurring clients" message="Three-week and monthly services will appear here." />
       ) : (
         <div className="data-table other-services-table">
-          <div className="data-row data-head"><span>Client</span><span>Address</span><span>Frequency</span><span>Next service</span><span>Schedule</span><span>Actions</span></div>
+          <div className="data-row data-head"><span>Client</span><span>Address</span><span>Frequency</span><span>Next service</span><span>Schedule</span><span>Last crew</span><span>Actions</span></div>
           {services.map((service) => (
             <article className="data-row" key={service.id}>
               <div data-label="Client"><strong>{service.customerName}</strong><small>{service.serviceName}</small></div>
               <div data-label="Address"><span>{service.addressLine1}</span><small>{service.city}, {service.postalCode}</small></div>
               <span data-label="Frequency">{recurrenceLabel(service.recurrenceRule)}</span>
-              <strong data-label="Next service">{shortDate(service.nextDueDate)}</strong>
+              <strong data-label="Next service">{shortDate(service.nextServiceDate)}</strong>
               <span data-label="Schedule">Schedule {service.week}</span>
-              <div data-label="Actions"><button className="text-button" disabled={!service.nextDueDate} type="button" onClick={() => onPlace(service)}>Place visit</button></div>
+              <span data-label="Last crew">{service.lastTeamName || "No prior crew"}</span>
+              <div className="row-actions" data-label="Actions">
+                <button className="text-button" disabled={!service.nextServiceDate} type="button" onClick={() => onPlace(service)}>Place</button>
+                <button className="text-button" type="button" onClick={() => onSetNextDate(service)}>Set next date</button>
+              </div>
             </article>
           ))}
         </div>
@@ -2646,13 +2694,13 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
             <Field label="Week of month">
               <select value={form.occurrence} onChange={(event) => setForm({ ...form, occurrence: event.target.value })}>
                 <option value="1">First</option><option value="2">Second</option><option value="3">Third</option>
-                <option value="4">Fourth</option><option value="5">Fifth</option>
+                <option value="4">Fourth</option>
               </select>
             </Field>
             <Field label="Weekday">
               <select value={form.weekday} onChange={(event) => setForm({ ...form, weekday: event.target.value })}>
                 <option value="1">Monday</option><option value="2">Tuesday</option><option value="3">Wednesday</option>
-                <option value="4">Thursday</option><option value="5">Friday</option><option value="6">Saturday</option>
+                <option value="4">Thursday</option><option value="5">Friday</option>
               </select>
             </Field>
           </>
@@ -2827,14 +2875,51 @@ function MoveBookingForm({ booking, days, teams, onCancel, onSaved }) {
   );
 }
 
-function PlaceOtherForm({ reference, service, teams, onCancel, onSaved }) {
-  const [teamId, setTeamId] = useState(service.preferredTeamId || teams[0]?.id || "");
-  const [startTime, setStartTime] = useState(String(service.preferredStartTime || "08:00").slice(0, 5));
-  const serviceDays = scheduleDaysFor(service.nextDueDate);
-  const dueWeekday = new Date(`${service.nextDueDate}T12:00:00`).getDay();
-  const [weekday, setWeekday] = useState(dueWeekday || 6);
+function PlaceOtherForm({ service, onCancel, onSaved }) {
+  const blocks = [
+    ["08:00", "8:00 AM"],
+    ["10:30", "10:30 AM"],
+    ["13:00", "1:00 PM"],
+    ["15:00", "3:00 PM"]
+  ];
+  const availability = useLoad(async () => {
+    await api.post("/schedule-planner/sync", { reference: service.nextServiceDate });
+    return api.get("/schedule-planner", {
+      week: service.week,
+      reference: service.nextServiceDate
+    });
+  }, [service.id, service.nextServiceDate, service.week]);
+  const teams = availability.data?.teams || [];
+  const serviceDay = availability.data?.days?.find((day) =>
+    day.date === service.nextServiceDate
+  );
+  const [teamId, setTeamId] = useState(service.preferredTeamId || "");
+  const [startTime, setStartTime] = useState(
+    String(service.preferredStartTime || "08:00").slice(0, 5)
+  );
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
+  const freeBlocks = (selectedTeamId) => blocks.filter(([value]) =>
+    !(serviceDay?.bookings || []).some((booking) =>
+      booking.teamId === selectedTeamId && booking.startTime === value
+    )
+  );
+
+  useEffect(() => {
+    if (!teams.length) return;
+    const selectedTeam = teams.find((team) => team.id === teamId);
+    const teamWithSpace = selectedTeam && freeBlocks(selectedTeam.id).length
+      ? selectedTeam
+      : teams.find((team) => freeBlocks(team.id).length);
+    if (!teamWithSpace) return;
+    const available = freeBlocks(teamWithSpace.id);
+    if (teamId !== teamWithSpace.id) setTeamId(teamWithSpace.id);
+    if (!available.some(([value]) => value === startTime)) {
+      setStartTime(available[0][0]);
+    }
+  }, [availability.data, teamId]);
+
+  const availableBlocks = freeBlocks(teamId);
 
   async function submit(event) {
     event.preventDefault();
@@ -2842,9 +2927,8 @@ function PlaceOtherForm({ reference, service, teams, onCancel, onSaved }) {
     setError("");
     try {
       await api.post(`/schedule-planner/others/${service.id}/place`, {
-        reference,
+        reference: service.nextServiceDate,
         week: service.week,
-        weekday,
         teamId,
         startTime
       });
@@ -2860,30 +2944,98 @@ function PlaceOtherForm({ reference, service, teams, onCancel, onSaved }) {
     <form className="modal-form" onSubmit={submit}>
       <div className="placement-summary">
         <span>Due occurrence</span>
-        <strong>{shortDate(service.nextDueDate)}</strong>
+        <strong>{shortDate(service.nextServiceDate)}</strong>
         <small>{recurrenceLabel(service.recurrenceRule)}</small>
       </div>
+      {availability.status === "loading" && <LoadingRows />}
+      {availability.status === "error" && (
+        <StatePanel
+          title="Schedule unavailable"
+          message={availability.error}
+          action={<button className="text-button" type="button" onClick={availability.reload}>Try again</button>}
+        />
+      )}
+      {availability.status === "ready" && !teams.some((team) => freeBlocks(team.id).length) && (
+        <StatePanel title="No open time blocks" message="Every crew is already booked for this service date." />
+      )}
       <div className="form-grid">
-        <Field label="Service day">
-          <select value={weekday} onChange={(event) => setWeekday(Number(event.target.value))}>
-            {serviceDays.map((day) => <option key={day.weekday} value={day.weekday}>{day.name} - {shortDate(day.date)}</option>)}
-          </select>
-        </Field>
         <Field label="Cleaning crew">
           <select required value={teamId} onChange={(event) => setTeamId(event.target.value)}>
             <option value="">Select crew</option>
-            {teams.map((team) => <option key={team.id} value={team.id}>{team.name}</option>)}
+            {teams.filter((team) => freeBlocks(team.id).length).map((team) => (
+              <option key={team.id} value={team.id}>{team.name}</option>
+            ))}
           </select>
         </Field>
         <Field label="Time block">
           <select value={startTime} onChange={(event) => setStartTime(event.target.value)}>
-            <option value="08:00">8:00 AM</option><option value="10:30">10:30 AM</option>
-            <option value="13:00">1:00 PM</option><option value="15:00">3:00 PM</option>
+            {availableBlocks.map(([value, label]) => (
+              <option key={value} value={value}>{label}</option>
+            ))}
           </select>
         </Field>
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <FormActions saving={saving} disabled={!teamId} onCancel={onCancel} submitLabel="Place visit" />
+      <FormActions
+        saving={saving}
+        disabled={!teamId || !availableBlocks.length || availability.status !== "ready"}
+        onCancel={onCancel}
+        submitLabel="Place visit"
+      />
+    </form>
+  );
+}
+
+function NextServiceDateForm({ reference, service, onCancel, onSaved }) {
+  const [nextDate, setNextDate] = useState(service.nextServiceDate || reference);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    const selected = new Date(`${nextDate}T12:00:00`);
+    let recurrenceRule = service.recurrenceRule;
+    if (recurrenceRule.type === "monthly") {
+      recurrenceRule = { type: "monthly", dayOfMonth: selected.getDate() };
+    }
+    if (recurrenceRule.type === "nth_weekday") {
+      const weekday = selected.getDay();
+      const occurrence = Math.ceil(selected.getDate() / 7);
+      if (weekday === 0 || weekday === 6 || occurrence > 4) {
+        setSaving(false);
+        setError("Monthly weekday services must use the first through fourth Monday-Friday.");
+        return;
+      }
+      recurrenceRule = { type: "nth_weekday", weekday, occurrence };
+    }
+    try {
+      await api.patch(`/recurring-services/${service.id}`, {
+        startsOn: nextDate,
+        recurrenceRule
+      });
+      onSaved();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <Field label="Next service date">
+        <input
+          required
+          min={reference}
+          type="date"
+          value={nextDate}
+          onChange={(event) => setNextDate(event.target.value)}
+        />
+      </Field>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions saving={saving} onCancel={onCancel} submitLabel="Set next date" />
     </form>
   );
 }
@@ -4489,17 +4641,6 @@ function shiftDate(value, days) {
 function nextScheduleDate(value) {
   const date = new Date(`${value}T12:00:00`);
   return date.getDay() === 0 ? shiftDate(value, 1) : value;
-}
-
-function scheduleDaysFor(value) {
-  const due = new Date(`${value}T12:00:00`);
-  const monday = new Date(due);
-  monday.setDate(due.getDate() - ((due.getDay() + 6) % 7));
-  return ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"].map((name, index) => {
-    const day = new Date(monday);
-    day.setDate(monday.getDate() + index);
-    return { name, weekday: index + 1, date: localDate(day) };
-  });
 }
 
 function recurrenceLabel(rule = {}) {

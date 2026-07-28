@@ -1128,6 +1128,14 @@ textarea:hover {
   grid-template-columns: minmax(140px, 1.15fr) minmax(140px, 1fr) 80px minmax(120px, 0.85fr) 80px minmax(200px, 1.2fr);
 }
 
+.customer-frequency-note {
+  display: -webkit-box;
+  overflow: hidden;
+  line-height: 1.4;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .employee-table .data-row {
   grid-template-columns: minmax(150px, 1.3fr) minmax(130px, 1fr) 90px 70px 80px 60px;
 }
@@ -1259,6 +1267,46 @@ textarea:hover {
   min-width: 0;
 }
 
+.flexible-due-list {
+  padding: 12px 14px;
+  background: #fffaf0;
+  border-bottom: 1px solid #dfc878;
+}
+
+.flexible-due-list > strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #5b4a13;
+  font-size: 0.72rem;
+}
+
+.flexible-due-list article {
+  display: grid;
+  min-height: 48px;
+  padding: 8px 0;
+  grid-template-columns: minmax(180px, 1.5fr) minmax(110px, 0.8fr) auto;
+  align-items: center;
+  gap: 14px;
+  border-top: 1px solid #eadba7;
+}
+
+.flexible-due-list span,
+.flexible-due-list small {
+  display: block;
+}
+
+.flexible-due-list span {
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.flexible-due-list small {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+
 .crew-tabs {
   min-height: 54px;
   padding: 8px 12px;
@@ -1353,7 +1401,7 @@ textarea:hover {
 }
 
 .other-services-table .data-row {
-  grid-template-columns: minmax(150px, 1.2fr) minmax(170px, 1.3fr) minmax(135px, 1fr) 110px 90px 75px;
+  grid-template-columns: minmax(140px, 1.1fr) minmax(150px, 1.2fr) minmax(125px, 1fr) 100px 80px 105px minmax(110px, 0.8fr);
 }
 
 .service-history-table .data-row {
@@ -2496,6 +2544,15 @@ textarea:hover {
 
   .schedule-day-tabs button.active {
     box-shadow: inset 0 -3px 0 var(--accent);
+  }
+
+  .flexible-due-list article {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
+  }
+
+  .flexible-due-list article .text-button {
+    justify-self: start;
   }
 
   .time-block-head {
