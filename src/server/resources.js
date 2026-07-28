@@ -15,6 +15,7 @@ const paging = {
   offset: z.coerce.number().int().min(0).default(0)
 };
 const searchQuery = z.string().trim().max(200).optional();
+const customerStatus = z.enum(["lead", "active", "paused", "inactive", "cancelled"]);
 
 const customerBase = z.object({
   type: z.enum(["residential", "commercial", "realtor"]),
@@ -101,7 +102,7 @@ const configs = [
       ...paging,
       q: searchQuery,
       type: customerBase.shape.type.optional(),
-      status: customerBase.shape.status
+      status: customerStatus.optional()
     }).strict(),
     filters: { type: "type", status: "status" },
     search: ["name", "email", "phone"],
@@ -657,6 +658,97 @@ function registerMembershipRoutes(router, pool) {
   }));
 }
 
+function registerCustomerCancellation(router, pool) {
+  const inputSchema = z.object({
+    reason: z.string().trim().max(1000).optional().default("")
+  }).strict();
+
+  router.post("/customers/:id/cancel", route(async (req, res) => {
+    const id = idFrom(req);
+    const input = validate(inputSchema, req.body || {});
+    const result = await transaction(pool, async client => {
+      const before = await requireOwned(
+        client, "customers", id, req.auth.organizationId, "Customer"
+      );
+      if (before.status === "cancelled") {
+        return { customer: before, recurringCount: 0, bookingCount: 0 };
+      }
+
+      const recurring = await client.query(
+        `UPDATE recurring_services
+         SET status = 'ended', ended_at = now(), updated_at = now()
+         WHERE organization_id = $1 AND customer_id = $2
+           AND status IN ('active', 'paused')
+         RETURNING id`,
+        [req.auth.organizationId, id]
+      );
+      await client.query(
+        `DELETE FROM route_stops
+         WHERE organization_id = $1 AND booking_id IN (
+           SELECT id FROM bookings
+           WHERE organization_id = $1 AND customer_id = $2
+             AND scheduled_start >= now()
+             AND status IN ('requested', 'confirmed', 'assigned')
+         )`,
+        [req.auth.organizationId, id]
+      );
+      await client.query(
+        `UPDATE notifications SET status = 'cancelled'
+         WHERE organization_id = $1 AND status = 'queued' AND booking_id IN (
+           SELECT id FROM bookings
+           WHERE organization_id = $1 AND customer_id = $2
+             AND scheduled_start >= now()
+             AND status IN ('requested', 'confirmed', 'assigned')
+         )`,
+        [req.auth.organizationId, id]
+      );
+      const futureBookings = await client.query(
+        `UPDATE bookings SET status = 'cancelled', updated_at = now()
+         WHERE organization_id = $1 AND customer_id = $2
+           AND scheduled_start >= now()
+           AND status IN ('requested', 'confirmed', 'assigned')
+         RETURNING id`,
+        [req.auth.organizationId, id]
+      );
+      await client.query(
+        `UPDATE notifications SET status = 'cancelled'
+         WHERE organization_id = $1 AND customer_id = $2 AND status = 'queued'`,
+        [req.auth.organizationId, id]
+      );
+      const updated = await client.query(
+        `UPDATE customers
+         SET status = 'cancelled', cancelled_at = now(),
+             cancellation_reason = $3, updated_at = now()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [id, req.auth.organizationId, input.reason || null]
+      );
+      const customer = updated.rows[0];
+      await recordAudit(client, req.auth, {
+        entityType: "customer",
+        entityId: id,
+        action: "cancel",
+        before: apiRow(before),
+        after: {
+          ...apiRow(customer),
+          endedRecurringServices: recurring.rowCount,
+          cancelledBookings: futureBookings.rowCount
+        }
+      });
+      return {
+        customer,
+        recurringCount: recurring.rowCount,
+        bookingCount: futureBookings.rowCount
+      };
+    });
+    data(res, {
+      customer: apiRow(result.customer),
+      endedRecurringServices: result.recurringCount,
+      cancelledBookings: result.bookingCount
+    });
+  }));
+}
+
 export function createResourceRouter({ pool }) {
   const router = express.Router();
 
@@ -674,6 +766,7 @@ export function createResourceRouter({ pool }) {
 
   router.use(requireRole("manager"));
   for (const config of configs) registerCrud(router, pool, config);
+  registerCustomerCancellation(router, pool);
   registerMembershipRoutes(router, pool);
   return router;
 }

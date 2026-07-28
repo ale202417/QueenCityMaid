@@ -115,6 +115,10 @@ not exposed.
 - `POST /api/imports/customers` and `POST /api/imports/employees` accept
   validated spreadsheet row arrays and update matches by phone number.
 - `POST /api/customers/:id/text-consent` records explicit consent or revocation.
+- `POST /api/customers/:id/cancel` accepts an optional `reason`, marks the
+  customer cancelled, ends active or paused recurring services, cancels future
+  unstarted bookings and queued reminders, and preserves prior operational and
+  financial history. Repeated requests are safe.
 - Booking and payment reminders are queued at
   `/api/bookings/:id/reminder` and `/api/customers/:id/payment-reminder`.
 - `GET /api/notifications` lists delivery state;

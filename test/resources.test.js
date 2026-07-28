@@ -214,6 +214,105 @@ describe("manager resources", () => {
     assert.equal(searched.body.data.customers[0].name, "Scale Customer 1019");
   });
 
+  it("cancels a customer without deleting service or financial history", async () => {
+    const { pool, ids, request, login } = await fixture();
+    const { cookie } = await login("manager-a@example.com");
+    const customerId = crypto.randomUUID();
+    const propertyId = crypto.randomUUID();
+    const serviceTypeId = crypto.randomUUID();
+    const recurringId = crypto.randomUUID();
+    const futureBookingId = crypto.randomUUID();
+    const pastBookingId = crypto.randomUUID();
+
+    await pool.query(
+      `INSERT INTO customers (id, organization_id, type, name, phone)
+       VALUES ($1, $2, 'residential', 'Cancelled Client', '7045550199')`,
+      [customerId, ids.organizationA]
+    );
+    await pool.query(
+      `INSERT INTO properties
+       (id, organization_id, customer_id, address_line1, city, postal_code)
+       VALUES ($1, $2, $3, '900 Trade St', 'Charlotte', '28202')`,
+      [propertyId, ids.organizationA, customerId]
+    );
+    await pool.query(
+      `INSERT INTO service_types (id, organization_id, name, category)
+       VALUES ($1, $2, 'Regular Cleaning', 'residential')`,
+      [serviceTypeId, ids.organizationA]
+    );
+    await pool.query(
+      `INSERT INTO recurring_services
+       (id, organization_id, customer_id, property_id, service_type_id, status,
+        recurrence_rule, expected_duration_minutes, price_cents, starts_on)
+       VALUES ($1, $2, $3, $4, $5, 'active', $6, 120, 18000, '2099-01-05')`,
+      [
+        recurringId, ids.organizationA, customerId, propertyId, serviceTypeId,
+        JSON.stringify({ type: "weekly", intervalWeeks: 1 })
+      ]
+    );
+    await pool.query(
+      `INSERT INTO bookings
+       (id, organization_id, customer_id, property_id, service_type_id, status,
+        scheduled_start, service_date, expected_duration_minutes, price_cents)
+       VALUES
+       ($1, $2, $3, $4, $5, 'confirmed', '2099-01-05T13:00:00Z', '2099-01-05', 120, 18000),
+       ($6, $2, $3, $4, $5, 'completed', '2020-01-05T13:00:00Z', '2020-01-05', 120, 18000)`,
+      [
+        futureBookingId, ids.organizationA, customerId, propertyId, serviceTypeId,
+        pastBookingId
+      ]
+    );
+
+    const cancelled = await request(`/api/customers/${customerId}/cancel`, {
+      method: "POST",
+      cookie,
+      body: { reason: "Customer ended maid service" }
+    });
+    assert.equal(cancelled.response.status, 200, JSON.stringify(cancelled.body));
+    assert.equal(cancelled.body.data.customer.status, "cancelled");
+    assert.equal(cancelled.body.data.customer.cancellationReason, "Customer ended maid service");
+    assert.equal(cancelled.body.data.endedRecurringServices, 1);
+    assert.equal(cancelled.body.data.cancelledBookings, 1);
+
+    const records = await pool.query(
+      `SELECT id, status FROM bookings WHERE id IN ($1, $2) ORDER BY id`,
+      [futureBookingId, pastBookingId]
+    );
+    const statusById = Object.fromEntries(records.rows.map(item => [item.id, item.status]));
+    assert.equal(statusById[futureBookingId], "cancelled");
+    assert.equal(statusById[pastBookingId], "completed");
+    const recurring = await pool.query(
+      "SELECT status, ended_at FROM recurring_services WHERE id = $1",
+      [recurringId]
+    );
+    assert.equal(recurring.rows[0].status, "ended");
+    assert.ok(recurring.rows[0].ended_at);
+
+    const listed = await request("/api/customers?status=cancelled", { cookie });
+    assert.equal(listed.body.data.customers[0].id, customerId);
+    const repeated = await request(`/api/customers/${customerId}/cancel`, {
+      method: "POST",
+      cookie,
+      body: {}
+    });
+    assert.equal(repeated.response.status, 200);
+    assert.equal(repeated.body.data.cancelledBookings, 0);
+
+    const cleaner = await login("cleaner-a@example.com");
+    const forbidden = await request(`/api/customers/${customerId}/cancel`, {
+      method: "POST",
+      cookie: cleaner.cookie,
+      body: {}
+    });
+    assert.equal(forbidden.response.status, 403);
+    const hidden = await request(`/api/customers/${customerId}/cancel`, {
+      method: "POST",
+      cookie: (await login("manager-b@example.com")).cookie,
+      body: {}
+    });
+    assert.equal(hidden.response.status, 404);
+  });
+
   it("manages employees, teams, availability, and quality feedback", async () => {
     const { request, login } = await fixture();
     const { cookie } = await login("manager-a@example.com");

@@ -37,6 +37,7 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 29 | Recurring booking service-type override for an individual scheduled visit | 28 | done |
 | 30 | Scoped recurring-service edits for one visit or all eligible future visits | 29 | done |
 | 31 | Flexible recurrence rollover, open-slot placement, customer notes, and last-crew history | 30 | done |
+| 32 | Customer cancellation with future-service shutdown and preserved history | 31 | done |
 
 ## Decisions
 
@@ -93,6 +94,9 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   available as the business grows.
 - Deleting a property archives it instead of removing its database row so prior
   bookings, payments, and reports keep their historical references.
+- Cancelling a customer ends active or paused recurring plans, cancels future
+  unstarted bookings and queued reminders, and removes those visits from crew
+  routes. Completed services, charges, balances, and reports remain intact.
 
 ## Verification
 
@@ -151,7 +155,11 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 - Flexible recurrence dates, manager-set next dates, weekday adjustment,
   open-slot conflict protection, post-service rollover, last servicing crew,
   customer frequency synchronization, and cross-module schedule reads pass
-  regression tests. Full suite: 58 passing tests; production build: passing.
+  regression tests.
+- Customer cancellation status, reason, recurring-plan shutdown, future-booking
+  cancellation, idempotency, manager permissions, organization isolation, and
+  historical-record preservation pass regression tests. Full suite: 59 passing
+  tests; production build: passing.
 
 ## Definition of Done
 

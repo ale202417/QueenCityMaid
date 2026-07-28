@@ -209,11 +209,11 @@ function Modal({ title, description, onClose, children }) {
   );
 }
 
-function FormActions({ saving, disabled = false, submitLabel = "Save", onCancel }) {
+function FormActions({ saving, disabled = false, danger = false, submitLabel = "Save", onCancel }) {
   return (
     <div className="form-actions">
       <button className="secondary-button" type="button" onClick={onCancel}>Cancel</button>
-      <button className="primary-button inline-button" disabled={saving || disabled} type="submit">
+      <button className={danger ? "danger-button" : "primary-button inline-button"} disabled={saving || disabled} type="submit">
         {saving ? "Saving..." : submitLabel}
       </button>
     </div>
@@ -657,6 +657,7 @@ function CustomersPage() {
             <option value="paused">Paused</option>
             <option value="lead">Lead</option>
             <option value="inactive">Inactive</option>
+            <option value="cancelled">Cancelled</option>
           </select>
           <button className="secondary-button" type="button" onClick={resource.reload}>Refresh</button>
         </div>
@@ -703,6 +704,9 @@ function CustomersPage() {
                     <button className="text-button" type="button" onClick={() => setModal({ type: "customer", item: customer })}>Edit</button>
                     <button className="text-button" type="button" onClick={() => setModal({ type: "consent", customer })}>Text consent</button>
                     <button className="text-button" type="button" onClick={() => paymentReminder(customer)}>Payment reminder</button>
+                    {customer.status !== "cancelled" && (
+                      <button className="text-button danger-text" type="button" onClick={() => setModal({ type: "cancel-customer", customer })}>Cancel customer</button>
+                    )}
                   </div>
                 </article>
             ))}
@@ -758,6 +762,23 @@ function CustomersPage() {
             onSaved={(message) => {
               setModal(null);
               setNotice({ message });
+            }}
+          />
+        </Modal>
+      )}
+      {modal?.type === "cancel-customer" && (
+        <Modal
+          title={`Cancel ${modal.customer.name}`}
+          description="Future visits and reminders will be cancelled. Prior services and balances remain."
+          onClose={() => setModal(null)}
+        >
+          <CancelCustomerForm
+            customer={modal.customer}
+            onCancel={() => setModal(null)}
+            onSaved={() => {
+              setModal(null);
+              setNotice({ message: `${modal.customer.name} was cancelled.` });
+              resource.reload();
             }}
           />
         </Modal>
@@ -819,6 +840,7 @@ function CustomerForm({ customer, onCancel, onSaved }) {
             <option value="paused">Paused</option>
             <option value="lead">Lead</option>
             <option value="inactive">Inactive</option>
+            {form.status === "cancelled" && <option value="cancelled" disabled>Cancelled</option>}
           </select>
         </Field>
         <Field label="Name">
@@ -862,6 +884,48 @@ function CustomerForm({ customer, onCancel, onSaved }) {
       </Field>
       {error && <p className="form-error" role="alert">{error}</p>}
       <FormActions saving={saving} onCancel={onCancel} submitLabel={customer ? "Save changes" : "Add customer"} />
+    </form>
+  );
+}
+
+function CancelCustomerForm({ customer, onCancel, onSaved }) {
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      await api.post(`/customers/${customer.id}/cancel`, { reason });
+      onSaved();
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <Field label="Cancellation reason">
+        <textarea
+          autoFocus
+          maxLength="1000"
+          placeholder="Optional"
+          rows="3"
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
+        />
+      </Field>
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions
+        danger
+        saving={saving}
+        onCancel={onCancel}
+        submitLabel="Cancel customer"
+      />
     </form>
   );
 }

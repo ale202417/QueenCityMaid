@@ -98,7 +98,7 @@ CREATE TABLE customers (
   email text,
   phone text NOT NULL,
   preferred_channel text NOT NULL DEFAULT 'sms',
-  status text NOT NULL DEFAULT 'active' CHECK (status IN ('lead', 'active', 'paused', 'inactive')),
+  status text NOT NULL DEFAULT 'active' CHECK (status IN ('lead', 'active', 'paused', 'inactive', 'cancelled')),
   internal_notes text NOT NULL DEFAULT '',
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
