@@ -38,6 +38,7 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 30 | Scoped recurring-service edits for one visit or all eligible future visits | 29 | done |
 | 31 | Flexible recurrence rollover, open-slot placement, customer notes, and last-crew history | 30 | done |
 | 32 | Customer cancellation with future-service shutdown and preserved history | 31 | done |
+| 33 | Single-visit cancellation, route cleanup, reminder shutdown, and optional fee | 32 | done |
 
 ## Decisions
 
@@ -97,6 +98,9 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 - Cancelling a customer ends active or paused recurring plans, cancels future
   unstarted bookings and queued reminders, and removes those visits from crew
   routes. Completed services, charges, balances, and reports remain intact.
+- Cancelling one visit leaves its customer and recurring plan active. The visit
+  is removed from its route, its queued reminder is cancelled, and a manager may
+  apply the configured late-cancellation fee to the customer ledger.
 
 ## Verification
 
@@ -159,7 +163,11 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 - Customer cancellation status, reason, recurring-plan shutdown, future-booking
   cancellation, idempotency, manager permissions, organization isolation, and
   historical-record preservation pass regression tests. Full suite: 59 passing
-  tests; production build: passing.
+  tests.
+- Single-visit cancellation with and without a fee, route and reminder cleanup,
+  recurring-plan preservation, duplicate protection, manager permissions, and
+  organization isolation pass regression tests. Full suite: 60 passing tests;
+  production build: passing.
 
 ## Definition of Done
 

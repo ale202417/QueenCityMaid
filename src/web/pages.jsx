@@ -2158,6 +2158,7 @@ function SchedulePage() {
             selectedDay={selectedDay}
             teamId={teamId}
             onDayChange={setDayIndex}
+            onCancelBooking={(booking) => setModal({ type: "cancel-booking", booking })}
             onEdit={(booking) => setModal({ type: "edit-booking", booking })}
             onMove={(booking) => setModal({ type: "move", booking })}
             onPlaceFlexible={(service) => setModal({ type: "place", service })}
@@ -2216,6 +2217,23 @@ function SchedulePage() {
           />
         </Modal>
       )}
+      {modal?.type === "cancel-booking" && (
+        <Modal
+          title={`Cancel visit - ${modal.booking.customerName}`}
+          description={`${shortDate(modal.booking.serviceDate)} at ${clock(modal.booking.scheduledStart)}. The recurring service will remain active.`}
+          onClose={() => setModal(null)}
+        >
+          <CancelVisitForm
+            booking={modal.booking}
+            onCancel={() => setModal(null)}
+            onSaved={(feeApplied) => changed(
+              feeApplied
+                ? "Visit cancelled and cancellation fee added."
+                : "Visit cancelled. The recurring service remains active."
+            )}
+          />
+        </Modal>
+      )}
       {modal?.type === "edit-booking" && (
         <Modal
           title={`Edit service - ${modal.booking.customerName}`}
@@ -2264,6 +2282,7 @@ function WeeklySchedule({
   plan,
   selectedDay,
   teamId,
+  onCancelBooking,
   onDayChange,
   onEdit,
   onMove,
@@ -2338,14 +2357,19 @@ function WeeklySchedule({
         {crewTabs.length === 0 ? (
           <StatePanel title="No cleaning crews" message="Add an active team before assigning work." />
         ) : (
-          <TimeBlockSchedule bookings={crewBookings} onEdit={onEdit} onMove={onMove} />
+          <TimeBlockSchedule
+            bookings={crewBookings}
+            onCancelBooking={onCancelBooking}
+            onEdit={onEdit}
+            onMove={onMove}
+          />
         )}
       </div>
     </div>
   );
 }
 
-function TimeBlockSchedule({ bookings, onEdit, onMove }) {
+function TimeBlockSchedule({ bookings, onCancelBooking, onEdit, onMove }) {
   return (
     <div className="time-block-table">
       <div className="time-block-row time-block-head">
@@ -2382,6 +2406,7 @@ function TimeBlockSchedule({ bookings, onEdit, onMove }) {
                 <>
                   <button className="text-button" type="button" onClick={() => onEdit(booking)}>Edit service</button>
                   <button className="text-button" type="button" onClick={() => onMove(booking)}>Move</button>
+                  <button className="text-button danger-text" type="button" onClick={() => onCancelBooking(booking)}>Cancel visit</button>
                 </>
               ) : <span className="muted">History</span>}
             </div>
@@ -2935,6 +2960,79 @@ function MoveBookingForm({ booking, days, teams, onCancel, onSaved }) {
       </div>
       {error && <p className="form-error" role="alert">{error}</p>}
       <FormActions saving={saving} onCancel={onCancel} submitLabel="Move booking" />
+    </form>
+  );
+}
+
+function CancelVisitForm({ booking, onCancel, onSaved }) {
+  const settings = useLoad(() => api.settings(), []);
+  const [reason, setReason] = useState("");
+  const [applyFee, setApplyFee] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const feeCents = settings.data?.settings?.lateCancellationFeeCents || 0;
+  const [within48Hours] = useState(() => {
+    const hours = (
+      new Date(booking.scheduledStart).getTime() - Date.now()
+    ) / 3_600_000;
+    return hours > 0 && hours <= 48;
+  });
+
+  useEffect(() => {
+    if (settings.status === "ready" && within48Hours) {
+      setApplyFee(feeCents > 0);
+    }
+  }, [settings.status, feeCents, within48Hours]);
+
+  async function submit(event) {
+    event.preventDefault();
+    setSaving(true);
+    setError("");
+    try {
+      const result = await api.post(`/schedule-planner/bookings/${booking.id}/cancel`, {
+        reason,
+        applyFee
+      });
+      onSaved(result.cancellationFeeCents > 0);
+    } catch (requestError) {
+      setError(errorMessage(requestError));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <form className="modal-form" onSubmit={submit}>
+      <Field label="Cancellation reason">
+        <textarea
+          autoFocus
+          maxLength="1000"
+          placeholder="Optional"
+          rows="3"
+          value={reason}
+          onChange={(event) => setReason(event.target.value)}
+        />
+      </Field>
+      {settings.status === "ready" && feeCents > 0 && (
+        <label className="checkbox-field">
+          <input
+            checked={applyFee}
+            type="checkbox"
+            onChange={(event) => setApplyFee(event.target.checked)}
+          />
+          <span>
+            Apply {money(feeCents)} cancellation fee
+            {within48Hours && <small>Inside the 48-hour cancellation window</small>}
+          </span>
+        </label>
+      )}
+      {error && <p className="form-error" role="alert">{error}</p>}
+      <FormActions
+        danger
+        saving={saving}
+        onCancel={onCancel}
+        submitLabel="Cancel visit"
+      />
     </form>
   );
 }

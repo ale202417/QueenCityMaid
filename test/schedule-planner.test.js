@@ -34,6 +34,12 @@ async function fixture(role = "manager") {
     [id.organizationA, id.organizationB]
   );
   await pool.query(
+    `INSERT INTO business_settings
+     (organization_id, late_cancellation_fee_cents)
+     VALUES ($1, 5000), ($2, 5000)`,
+    [id.organizationA, id.organizationB]
+  );
+  await pool.query(
     `INSERT INTO users (id, organization_id, email, name, role, password_hash)
      VALUES
        ($1, $2, 'manager@qcm.test', 'Queen City Manager', 'manager', 'hash'),
@@ -412,6 +418,105 @@ describe("schedule planner API", () => {
     assert.equal(completed.body.error.code, "invalid_state");
   });
 
+  it("cancels one visit while keeping its recurring service active", async () => {
+    const { pool, id, request } = await fixture();
+    await sync(request);
+    const booking = await pool.query(
+      `SELECT id FROM bookings
+       WHERE organization_id = $1 AND recurring_service_id = $2
+       ORDER BY service_date LIMIT 1`,
+      [id.organizationA, id.weeklyService]
+    );
+    const bookingId = booking.rows[0].id;
+    const notificationId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO notifications
+       (id, organization_id, customer_id, booking_id, type, channel,
+        destination, body, status, idempotency_key, due_at)
+       VALUES ($1, $2, $3, $4, 'booking_reminder', 'sms',
+               '7045552000', 'Reminder', 'queued', $5, now())`,
+      [
+        notificationId, id.organizationA, id.weeklyCustomer,
+        bookingId, `cancel-${bookingId}`
+      ]
+    );
+
+    const cancelled = await request(
+      `/api/schedule-planner/bookings/${bookingId}/cancel`,
+      {
+        method: "POST",
+        body: { reason: "Customer is out of town", applyFee: true }
+      }
+    );
+    assert.equal(cancelled.response.status, 200, JSON.stringify(cancelled.body));
+    assert.equal(cancelled.body.data.booking.status, "cancelled");
+    assert.equal(cancelled.body.data.booking.cancellationReason, "Customer is out of town");
+    assert.equal(cancelled.body.data.cancellationFeeCents, 5000);
+    assert.ok(cancelled.body.data.cancellationChargeId);
+
+    const stored = await pool.query(
+      `SELECT b.status, b.cancellation_reason AS "cancellationReason",
+              rs.status AS "recurringStatus"
+       FROM bookings b
+       JOIN recurring_services rs ON rs.id = b.recurring_service_id
+       WHERE b.id = $1`,
+      [bookingId]
+    );
+    assert.deepEqual(stored.rows[0], {
+      status: "cancelled",
+      cancellationReason: "Customer is out of town",
+      recurringStatus: "active"
+    });
+    const stops = await pool.query(
+      "SELECT COUNT(*)::integer AS count FROM route_stops WHERE booking_id = $1",
+      [bookingId]
+    );
+    assert.equal(stops.rows[0].count, 0);
+    const notification = await pool.query(
+      "SELECT status FROM notifications WHERE id = $1",
+      [notificationId]
+    );
+    assert.equal(notification.rows[0].status, "cancelled");
+    const charge = await pool.query(
+      `SELECT type, amount_cents AS "amountCents", status
+       FROM customer_charges WHERE booking_id = $1`,
+      [bookingId]
+    );
+    assert.deepEqual(charge.rows, [{
+      type: "cancellation_fee",
+      amountCents: 5000,
+      status: "unpaid"
+    }]);
+
+    const repeated = await request(
+      `/api/schedule-planner/bookings/${bookingId}/cancel`,
+      { method: "POST", body: { applyFee: true } }
+    );
+    assert.equal(repeated.response.status, 200);
+    const charges = await pool.query(
+      "SELECT COUNT(*)::integer AS count FROM customer_charges WHERE booking_id = $1",
+      [bookingId]
+    );
+    assert.equal(charges.rows[0].count, 1);
+
+    const plan = await request("/api/schedule-planner?week=A&reference=2026-07-27");
+    assert.ok(!allBookings(plan.body.data).some(item => item.id === bookingId));
+
+    const biweekly = await pool.query(
+      `SELECT id FROM bookings
+       WHERE organization_id = $1 AND recurring_service_id = $2
+       ORDER BY service_date LIMIT 1`,
+      [id.organizationA, id.biweeklyService]
+    );
+    const noFee = await request(
+      `/api/schedule-planner/bookings/${biweekly.rows[0].id}/cancel`,
+      { method: "POST", body: { applyFee: false } }
+    );
+    assert.equal(noFee.response.status, 200);
+    assert.equal(noFee.body.data.cancellationFeeCents, 0);
+    assert.equal(noFee.body.data.cancellationChargeId, null);
+  });
+
   it("keeps a Sunday fixed recurrence due date while placing service on Saturday", async () => {
     const { pool, id, request } = await fixture();
     const sundayService = crypto.randomUUID();
@@ -593,6 +698,11 @@ describe("schedule planner API", () => {
     );
     assert.equal(denied.response.status, 403);
     assert.equal(denied.body.error.code, "forbidden");
+    const cancelDenied = await cleaner.request(
+      `/api/schedule-planner/bookings/${crypto.randomUUID()}/cancel`,
+      { method: "POST", body: {} }
+    );
+    assert.equal(cancelDenied.response.status, 403);
 
     const { pool, id, request } = await fixture();
     await sync(request);
@@ -628,5 +738,10 @@ describe("schedule planner API", () => {
     );
     assert.equal(hidden.response.status, 404);
     assert.equal(hidden.body.error.code, "not_found");
+    const cancelHidden = await request(
+      `/api/schedule-planner/bookings/${foreignBooking.booking}/cancel`,
+      { method: "POST", body: {} }
+    );
+    assert.equal(cancelHidden.response.status, 404);
   });
 });

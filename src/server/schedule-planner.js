@@ -35,6 +35,11 @@ const placeInput = z.object({
   reference: dateOnly.optional()
 }).strict();
 
+const cancelInput = z.object({
+  reason: z.string().trim().max(1000).optional().default(""),
+  applyFee: z.boolean().default(false)
+}).strict();
+
 const historyQuery = z.object({
   from: dateOnly.optional(),
   to: dateOnly.optional(),
@@ -671,6 +676,118 @@ export function createScheduleRouter({ pool }) {
       };
     });
     data(res, { booking: moved });
+  }));
+
+  router.post("/schedule-planner/bookings/:id/cancel", asyncRoute(async (req, res) => {
+    const bookingId = validate(uuid, req.params.id);
+    const input = validate(cancelInput, req.body || {});
+    const cancelled = await transaction(pool, async (client) => {
+      const result = await client.query(
+        `SELECT b.*, COALESCE(bs.late_cancellation_fee_cents, 0)
+                   AS late_cancellation_fee_cents
+         FROM bookings b
+         LEFT JOIN business_settings bs ON bs.organization_id = b.organization_id
+         WHERE b.id = $1 AND b.organization_id = $2`,
+        [bookingId, req.auth.organizationId]
+      );
+      if (!result.rowCount) throw new HttpError(404, "not_found", "Booking not found");
+      const before = result.rows[0];
+      if (before.status === "cancelled") {
+        const charge = await client.query(
+          `SELECT id, amount_cents FROM customer_charges
+           WHERE organization_id = $1 AND booking_id = $2
+             AND type = 'cancellation_fee'
+           ORDER BY created_at LIMIT 1`,
+          [req.auth.organizationId, bookingId]
+        );
+        return {
+          booking: before,
+          cancellationFeeCents: Number(charge.rows[0]?.amount_cents || 0),
+          chargeId: charge.rows[0]?.id || null
+        };
+      }
+      if (!["requested", "confirmed", "assigned"].includes(before.status)) {
+        throw new HttpError(
+          409, "invalid_state", "Started or completed service cannot be cancelled"
+        );
+      }
+
+      await detachBooking(client, req.auth.organizationId, bookingId);
+      await client.query(
+        `UPDATE notifications SET status = 'cancelled'
+         WHERE organization_id = $1 AND booking_id = $2 AND status = 'queued'`,
+        [req.auth.organizationId, bookingId]
+      );
+      const feeCents = input.applyFee ? Number(before.late_cancellation_fee_cents) : 0;
+      const updated = await client.query(
+        `UPDATE bookings
+         SET status = 'cancelled', cancellation_reason = $3,
+             cancellation_fee_cents = $4, cancellation_fee_waived = false,
+             cancellation_waiver_reason = NULL, updated_at = now()
+         WHERE id = $1 AND organization_id = $2
+         RETURNING *`,
+        [bookingId, req.auth.organizationId, input.reason || null, feeCents]
+      );
+      let chargeId = null;
+      if (feeCents > 0) {
+        const existing = await client.query(
+          `SELECT id FROM customer_charges
+           WHERE organization_id = $1 AND booking_id = $2
+             AND type = 'cancellation_fee'
+           ORDER BY created_at LIMIT 1`,
+          [req.auth.organizationId, bookingId]
+        );
+        chargeId = existing.rows[0]?.id || crypto.randomUUID();
+        if (existing.rowCount) {
+          await client.query(
+            `UPDATE customer_charges
+             SET amount_cents = $3, status = 'unpaid',
+                 description = 'Late cancellation fee', charged_on = CURRENT_DATE
+             WHERE id = $1 AND organization_id = $2`,
+            [chargeId, req.auth.organizationId, feeCents]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO customer_charges
+             (id, organization_id, customer_id, booking_id, type, description,
+              amount_cents, status, charged_on)
+             VALUES ($1, $2, $3, $4, 'cancellation_fee',
+                     'Late cancellation fee', $5, 'unpaid', CURRENT_DATE)`,
+            [
+              chargeId, req.auth.organizationId, before.customer_id,
+              bookingId, feeCents
+            ]
+          );
+        }
+      }
+      await recordAudit(client, req.auth, {
+        entityType: "booking",
+        entityId: bookingId,
+        action: "cancel_visit",
+        before,
+        after: {
+          ...updated.rows[0],
+          cancellationFeeCents: feeCents,
+          cancellationChargeId: chargeId
+        }
+      });
+      return {
+        booking: updated.rows[0],
+        cancellationFeeCents: feeCents,
+        chargeId
+      };
+    });
+    data(res, {
+      booking: {
+        id: cancelled.booking.id,
+        status: cancelled.booking.status,
+        customerId: cancelled.booking.customer_id,
+        recurringServiceId: cancelled.booking.recurring_service_id,
+        cancellationReason: cancelled.booking.cancellation_reason
+      },
+      cancellationFeeCents: cancelled.cancellationFeeCents,
+      cancellationChargeId: cancelled.chargeId
+    });
   }));
 
   router.get("/schedule-planner/others", asyncRoute(async (req, res) => {

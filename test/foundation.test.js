@@ -21,7 +21,8 @@ describe("database foundation", () => {
       "008_financial_operations.sql",
       "009_default_service_types.sql",
       "010_search_indexes.sql",
-      "011_customer_cancellations.sql"
+      "011_customer_cancellations.sql",
+      "012_booking_cancellation_reason.sql"
       ]
     );
 

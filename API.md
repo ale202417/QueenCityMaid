@@ -134,6 +134,10 @@ not exposed.
 - `POST /api/schedule-planner/bookings/:id/move` moves an upcoming booking to
   another crew, service day, or time block. Started and completed work is
   immutable; unavailable crews and occupied crew/time blocks are rejected.
+- `POST /api/schedule-planner/bookings/:id/cancel` accepts an optional `reason`
+  and `applyFee`. It cancels only that visit, removes route assignments, cancels
+  queued reminders, optionally creates the configured late-cancellation ledger
+  charge, and leaves the customer and recurring service active.
 - `GET /api/schedule-planner/others` calculates the next unplaced three-week,
   monthly-date, and nth-weekday occurrence and returns the last servicing crew.
   Flexible Saturday dates move to Friday and Sunday dates move to Monday.
