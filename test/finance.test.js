@@ -296,6 +296,97 @@ describe("finance", () => {
     assert.equal(audit.rowCount, 5);
   });
 
+  it("records full or partial payment against the selected unpaid charge", async () => {
+    const { pool, ids, request } = await fixture();
+    const older = await createCharge(request, ids.customerA, 10000, "2026-07-20");
+    const selected = await createCharge(request, ids.customerA, 5000, "2026-07-22");
+    const body = {
+      method: "venmo",
+      amountCents: 3000,
+      paidAt: "2026-07-24T15:00:00-04:00",
+      reference: "Partial service payment"
+    };
+
+    const denied = await request(`/api/charges/${selected.id}/payments`, {
+      role: "cleaner",
+      userId: ids.cleanerA,
+      method: "POST",
+      body
+    });
+    assert.equal(denied.response.status, 403);
+
+    const partial = await request(`/api/charges/${selected.id}/payments`, {
+      method: "POST",
+      body
+    });
+    assert.equal(partial.response.status, 201, JSON.stringify(partial.body));
+    assert.deepEqual(partial.body.data.allocation, {
+      chargeId: selected.id,
+      amountCents: 3000
+    });
+    assert.equal(partial.body.data.charge.status, "unpaid");
+    assert.equal(partial.body.data.charge.outstandingCents, 2000);
+
+    const allocations = await pool.query(
+      `SELECT charge_id, amount_cents FROM payment_allocations
+       WHERE reversed_at IS NULL ORDER BY charge_id`,
+    );
+    assert.deepEqual(allocations.rows, [{ charge_id: selected.id, amount_cents: 3000 }]);
+    const records = await request("/api/payments/records");
+    const remaining = records.body.data.declined.find((charge) => charge.id === selected.id);
+    assert.equal(remaining.amountCents, 2000);
+    assert.equal(remaining.originalAmountCents, 5000);
+
+    const completed = await request(`/api/charges/${selected.id}/payments`, {
+      method: "POST",
+      body: {
+        ...body,
+        amountCents: 2500,
+        reference: "Final service payment"
+      }
+    });
+    assert.equal(completed.response.status, 201, JSON.stringify(completed.body));
+    assert.equal(completed.body.data.allocation.amountCents, 2000);
+    assert.equal(completed.body.data.charge.status, "paid");
+    assert.equal(completed.body.data.credit.remainingCents, 500);
+
+    const statuses = await pool.query(
+      "SELECT id, status FROM customer_charges WHERE id IN ($1, $2) ORDER BY id",
+      [older.id, selected.id]
+    );
+    assert.equal(statuses.rows.find((charge) => charge.id === older.id).status, "unpaid");
+    assert.equal(statuses.rows.find((charge) => charge.id === selected.id).status, "paid");
+    const repeated = await request(`/api/charges/${selected.id}/payments`, {
+      method: "POST",
+      body
+    });
+    assert.equal(repeated.response.status, 409);
+
+    const foreign = await createCharge(
+      (path, options) => request(path, {
+        ...options,
+        organizationId: ids.organizationB,
+        userId: ids.managerB
+      }),
+      ids.customerB,
+      4000,
+      "2026-07-22"
+    );
+    const hidden = await request(`/api/charges/${foreign.id}/payments`, {
+      method: "POST",
+      body
+    });
+    assert.equal(hidden.response.status, 404);
+
+    const audit = await pool.query(
+      `SELECT action FROM audit_events
+       WHERE organization_id = $1 AND entity_type = 'payment'`,
+      [ids.organizationA]
+    );
+    assert.equal(audit.rowCount, 2);
+    assert.ok(audit.rows.every(({ action }) => action === "create_for_charge"));
+  });
+
   it("turns the daily schedule into approved payments and declined balances", async () => {
     const { pool, ids, request } = await fixture();
     const daily = await request("/api/payments/daily?date=2026-07-20");

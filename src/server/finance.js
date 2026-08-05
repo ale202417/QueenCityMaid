@@ -658,7 +658,7 @@ export function createFinanceRouter({ pool }) {
 
   router.get("/payments/records", asyncRoute(async (req, res) => {
     const organizationId = req.auth.organizationId;
-    const [payments, declined, credits] = await Promise.all([
+    const [payments, declined, credits, declinedAllocations] = await Promise.all([
       pool.query(
         `SELECT p.id, p.customer_id, c.name AS customer_name, p.amount_cents,
                 p.method, p.paid_at, p.reference, p.status,
@@ -696,8 +696,19 @@ export function createFinanceRouter({ pool }) {
          WHERE cr.organization_id = $1 AND cr.remaining_cents > 0
          ORDER BY cr.created_at DESC`,
         [organizationId]
+      ),
+      pool.query(
+        `SELECT pa.charge_id, COALESCE(SUM(pa.amount_cents), 0) AS allocated_cents
+         FROM payment_allocations pa
+         JOIN customer_charges ch ON ch.id = pa.charge_id
+         WHERE ch.organization_id = $1 AND pa.reversed_at IS NULL
+         GROUP BY pa.charge_id`,
+        [organizationId]
       )
     ]);
+    const allocatedByCharge = new Map(declinedAllocations.rows.map(
+      (row) => [row.charge_id, Number(row.allocated_cents)]
+    ));
     data(res, {
       payments: payments.rows.map((row) => ({
         id: row.id,
@@ -721,7 +732,11 @@ export function createFinanceRouter({ pool }) {
         customerPhone: row.customer_phone,
         serviceName: row.service_name,
         serviceDate: row.service_date ? asDate(row.service_date) : null,
-        amountCents: Number(row.amount_cents),
+        amountCents: Math.max(
+          0,
+          Number(row.amount_cents) - (allocatedByCharge.get(row.id) || 0)
+        ),
+        originalAmountCents: Number(row.amount_cents),
         chargeType: row.type,
         description: row.description,
         chargedOn: asDate(row.charged_on)
@@ -1018,6 +1033,119 @@ export function createFinanceRouter({ pool }) {
       return {
         payment: { id: paymentId, customerId, ...input, reference: input.reference || "" },
         allocations,
+        credit
+      };
+    });
+    data(res, result, 201);
+  }));
+
+  router.post("/charges/:id/payments", asyncRoute(async (req, res) => {
+    const id = validate(uuid, req.params.id);
+    const input = validate(paymentSchema, req.body);
+    const organizationId = req.auth.organizationId;
+    const result = await transaction(pool, async (client) => {
+      const chargeResult = await client.query(
+        `SELECT * FROM customer_charges
+         WHERE id = $1 AND organization_id = $2
+         FOR UPDATE`,
+        [id, organizationId]
+      );
+      if (!chargeResult.rowCount) throw new HttpError(404, "not_found", "Charge not found");
+      const charge = chargeResult.rows[0];
+      if (charge.status !== "unpaid") {
+        throw new HttpError(409, "charge_not_payable", "Only an unpaid charge can receive a payment");
+      }
+      const allocationResult = await client.query(
+        `SELECT COALESCE(SUM(amount_cents), 0) AS allocated_cents
+         FROM payment_allocations
+         WHERE charge_id = $1 AND reversed_at IS NULL`,
+        [id]
+      );
+      const outstandingCents = Number(charge.amount_cents)
+        - Number(allocationResult.rows[0].allocated_cents);
+      if (outstandingCents <= 0) {
+        throw new HttpError(409, "charge_not_payable", "This charge has already been paid");
+      }
+
+      const paymentId = crypto.randomUUID();
+      await client.query(
+        `INSERT INTO payments
+         (id, organization_id, customer_id, recorded_by, method, amount_cents, paid_at, reference)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+        [
+          paymentId, organizationId, charge.customer_id, req.auth.id, input.method,
+          input.amountCents, input.paidAt, input.reference || ""
+        ]
+      );
+      const appliedCents = Math.min(input.amountCents, outstandingCents);
+      await client.query(
+        `INSERT INTO payment_allocations (payment_id, charge_id, amount_cents)
+         VALUES ($1, $2, $3)`,
+        [paymentId, id, appliedCents]
+      );
+
+      const paidInFull = appliedCents === outstandingCents;
+      if (paidInFull) {
+        await client.query(
+          `UPDATE customer_charges SET status = 'paid'
+           WHERE id = $1 AND organization_id = $2`,
+          [id, organizationId]
+        );
+        await client.query(
+          `UPDATE service_payment_decisions
+           SET decision = 'approved', payment_id = $3, decided_by = $4,
+               decided_at = now(), updated_at = now()
+           WHERE charge_id = $1 AND organization_id = $2`,
+          [id, organizationId, paymentId, req.auth.id]
+        );
+      }
+
+      let credit = null;
+      const excessCents = input.amountCents - appliedCents;
+      if (excessCents > 0) {
+        credit = {
+          id: crypto.randomUUID(),
+          amountCents: excessCents,
+          remainingCents: excessCents,
+          reason: "Payment exceeded selected charge"
+        };
+        await client.query(
+          `INSERT INTO customer_credits
+           (id, organization_id, customer_id, source_payment_id, amount_cents,
+            remaining_cents, reason)
+           VALUES ($1, $2, $3, $4, $5, $5, $6)`,
+          [
+            credit.id, organizationId, charge.customer_id, paymentId,
+            excessCents, credit.reason
+          ]
+        );
+      }
+      await recordAudit(client, req.auth, {
+        entityType: "payment",
+        entityId: paymentId,
+        action: "create_for_charge",
+        after: {
+          ...input,
+          chargeId: id,
+          appliedCents,
+          outstandingCents: outstandingCents - appliedCents,
+          credit
+        }
+      });
+      return {
+        payment: {
+          id: paymentId,
+          customerId: charge.customer_id,
+          ...input,
+          reference: input.reference || ""
+        },
+        allocation: { chargeId: id, amountCents: appliedCents },
+        charge: {
+          id,
+          status: paidInFull ? "paid" : "unpaid",
+          amountCents: Number(charge.amount_cents),
+          outstandingCents: outstandingCents - appliedCents
+        },
         credit
       };
     });

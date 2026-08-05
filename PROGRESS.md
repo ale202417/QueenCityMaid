@@ -50,6 +50,11 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 42 | Manager automation settings, manual run control, and run history UI | 40, 41 | done |
 | 43 | Automation API, permission, isolation, idempotency, browser, and upgrade tests | 40-42 | done |
 | 44 | Production release, deployment verification, and external smoke checks | 43 | done |
+| 45 | Declined-payment and service-plan edit release design | 44 | done |
+| 46 | Charge-specific payment recording, allocation, validation, and audit history | 45 | done |
+| 47 | Editable recurring service plans with eligible future-visit synchronization | 45 | done |
+| 48 | Manager UI controls and API/browser regression verification | 46, 47 | done |
+| 49 | Production release, deployment verification, and external smoke checks | 48 | in_progress |
 
 ## Decisions
 
@@ -139,6 +144,12 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   reversal, waiver, and void records rather than deleting financial history.
 - Every release runs both clean-install migration tests and a PostgreSQL upgrade
   from migration 012 with existing operational and financial records.
+- Recording payment from a declined service targets that exact charge. Partial
+  payments leave the remaining amount outstanding; excess money becomes a
+  customer credit instead of silently paying a different charge.
+- Editing a service plan updates the plan definition and eligible requested,
+  confirmed, or assigned future visits. Started and historical visits remain
+  unchanged.
 
 ## Verification
 
@@ -250,6 +261,17 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   passed its internal health check, and made the release live.
 - External production smoke and live browser-console checks pass at
   `https://queen-city-maid-operations.onrender.com`.
+- Selected past-due charges accept full or partial later payments without
+  allocating another charge first; duplicate, permission, organization, credit,
+  outstanding-balance, and audit cases pass. Full API suite: 74 passing tests.
+- Active and paused service plans expose a complete edit form. Detail changes
+  update eligible future visits, schedule changes release and regenerate future
+  occurrences, and completed history remains immutable.
+- Complete Playwright workflow suite: 24 passing tests, including declined
+  payment collection, payment reversal/waiver separation, persisted plan edits,
+  and the existing desktop/mobile role coverage.
+- Real PostgreSQL previous-release upgrade and production build pass. Production
+  dependency audit: 0 known vulnerabilities after updating PostCSS to 8.5.25.
 
 ## Definition of Done
 

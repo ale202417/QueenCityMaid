@@ -400,7 +400,7 @@ describe("sales API", () => {
         billing_rate_cents, special_instructions, starts_on)
        VALUES
        ($1, $2, $3, $4, $5, 'active',
-        '{"type":"weekly","intervalWeeks":1}', 180, 18000, 'flat', NULL, '', '2026-08-03')`,
+        '{"type":"weekly","intervalWeeks":1}', 180, 18000, 'flat', NULL, '', '2027-08-02')`,
       [
         recurringId, ids.organizationA, ids.customerA, ids.propertyA, ids.serviceA
       ]
@@ -411,12 +411,12 @@ describe("sales API", () => {
         recurring_service_id, status, scheduled_start, service_date,
         expected_duration_minutes, price_cents, billing_type, special_requests)
        VALUES
-       ($1, $4, $5, $6, $7, $8, 'confirmed', '2026-08-03T12:00:00Z',
-        '2026-08-03', 180, 18000, 'flat', ''),
-       ($2, $4, $5, $6, $7, $8, 'assigned', '2026-08-10T12:00:00Z',
-        '2026-08-10', 180, 18000, 'flat', ''),
-       ($3, $4, $5, $6, $7, $8, 'completed', '2026-08-17T12:00:00Z',
-        '2026-08-17', 180, 18000, 'flat', '')`,
+       ($1, $4, $5, $6, $7, $8, 'confirmed', '2027-08-02T12:00:00Z',
+        '2027-08-02', 180, 18000, 'flat', ''),
+       ($2, $4, $5, $6, $7, $8, 'assigned', '2027-08-09T12:00:00Z',
+        '2027-08-09', 180, 18000, 'flat', ''),
+       ($3, $4, $5, $6, $7, $8, 'completed', '2027-08-16T12:00:00Z',
+        '2027-08-16', 180, 18000, 'flat', '')`,
       [
         selectedId, futureId, completedId, ids.organizationA, ids.customerA,
         ids.propertyA, ids.serviceA, recurringId
@@ -481,6 +481,96 @@ describe("sales API", () => {
     assert.equal(pausedBookings.rows[0].status, "cancelled");
     assert.equal(pausedBookings.rows[1].status, "cancelled");
     assert.equal(pausedBookings.rows[2].status, "completed");
+  });
+
+  it("edits a service plan while preserving completed service history", async () => {
+    const { pool, ids, request } = await fixture();
+    const recurringId = crypto.randomUUID();
+    const futureId = crypto.randomUUID();
+    const completedId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO recurring_services
+       (id, organization_id, customer_id, property_id, service_type_id, status,
+        recurrence_rule, preferred_start_time, expected_duration_minutes,
+        price_cents, billing_type, billing_rate_cents, special_instructions, starts_on)
+       VALUES
+       ($1, $2, $3, $4, $5, 'active', '{"type":"weekly","intervalWeeks":2}',
+        '08:00', 180, 18000, 'flat', NULL, '', '2027-01-04')`,
+      [recurringId, ids.organizationA, ids.customerA, ids.propertyA, ids.serviceA]
+    );
+    await pool.query(
+      `INSERT INTO bookings
+       (id, organization_id, customer_id, property_id, service_type_id,
+        recurring_service_id, status, scheduled_start, service_date,
+        recurrence_due_date, expected_duration_minutes, price_cents, billing_type,
+        special_requests)
+       VALUES
+       ($1, $3, $4, $5, $6, $7, 'confirmed', '2027-01-04T13:00:00Z',
+        '2027-01-04', '2027-01-04', 180, 18000, 'flat', ''),
+       ($2, $3, $4, $5, $6, $7, 'completed', '2026-07-01T12:00:00Z',
+        '2026-07-01', '2026-07-01', 180, 18000, 'flat', '')`,
+      [
+        futureId, completedId, ids.organizationA, ids.customerA, ids.propertyA,
+        ids.serviceA, recurringId
+      ]
+    );
+
+    const details = await request(`/api/recurring-services/${recurringId}`, {
+      method: "PATCH",
+      body: {
+        serviceTypeId: ids.serviceAlternative,
+        expectedDurationMinutes: 240,
+        priceCents: 30000,
+        billingType: "flat",
+        billingRateCents: null,
+        specialInstructions: "Use the side entrance"
+      }
+    });
+    assert.equal(details.response.status, 200, JSON.stringify(details.body));
+    assert.equal(details.body.data.futureBookingsUpdated, 1);
+    assert.equal(details.body.data.futureBookingsCancelled, 0);
+    const afterDetails = await pool.query(
+      `SELECT id, status, service_type_id, expected_duration_minutes,
+              price_cents, special_requests
+       FROM bookings WHERE recurring_service_id = $1 ORDER BY scheduled_start`,
+      [recurringId]
+    );
+    assert.equal(afterDetails.rows[0].id, completedId);
+    assert.equal(afterDetails.rows[0].service_type_id, ids.serviceA);
+    assert.equal(afterDetails.rows[1].id, futureId);
+    assert.equal(afterDetails.rows[1].service_type_id, ids.serviceAlternative);
+    assert.equal(afterDetails.rows[1].expected_duration_minutes, 240);
+    assert.equal(afterDetails.rows[1].price_cents, 30000);
+    assert.equal(afterDetails.rows[1].special_requests, "Use the side entrance");
+
+    const schedule = await request(`/api/recurring-services/${recurringId}`, {
+      method: "PATCH",
+      body: {
+        startsOn: "2027-01-05",
+        preferredStartTime: "10:30",
+        recurrenceRule: { type: "weekly", intervalWeeks: 3 }
+      }
+    });
+    assert.equal(schedule.response.status, 200, JSON.stringify(schedule.body));
+    assert.equal(schedule.body.data.futureBookingsCancelled, 1);
+    assert.equal(schedule.body.data.recurringService.preferredStartTime, "10:30:00");
+    const afterSchedule = await pool.query(
+      `SELECT id, status, cancellation_reason, recurrence_due_date
+       FROM bookings WHERE recurring_service_id = $1 ORDER BY scheduled_start`,
+      [recurringId]
+    );
+    assert.equal(afterSchedule.rows[0].status, "completed");
+    assert.equal(afterSchedule.rows[1].status, "cancelled");
+    assert.equal(afterSchedule.rows[1].cancellation_reason, "Recurring service edited");
+    assert.equal(afterSchedule.rows[1].recurrence_due_date, null);
+
+    const audit = await pool.query(
+      `SELECT action FROM audit_events
+       WHERE organization_id = $1 AND entity_type = 'recurringService'`,
+      [ids.organizationA]
+    );
+    assert.equal(audit.rowCount, 2);
+    assert.ok(audit.rows.every(({ action }) => action === "update"));
   });
 
   it("rejects invalid payloads and invalid state transitions", async () => {

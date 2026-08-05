@@ -119,7 +119,31 @@ test("manager approves the daily service payment and sees persisted standing", a
   await expect(payment).toContainText("Browser QA incorrect confirmation");
 
   await page.getByRole("tab", { name: "Credits" }).click();
-  const charge = page.locator(".payment-record-table .data-row")
+  let charge = page.locator(".payment-record-table .data-row")
+    .filter({ hasText: "Jordan Ellis" });
+  await charge.getByRole("button", { name: "Record payment" }).click();
+  dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("Amount")).toHaveValue("220.00");
+  await dialog.getByLabel("Method").selectOption("check");
+  await dialog.getByLabel("Reference").fill("Browser QA check 1042");
+  await dialog.getByRole("button", { name: "Record payment" }).click();
+  await expect(page.getByText("Payment recorded and customer balance updated.")).toBeVisible();
+  await expect(page.locator(".payment-record-table .data-row")
+    .filter({ hasText: "Jordan Ellis" })).toHaveCount(0);
+
+  await page.getByRole("tab", { name: "Payments", exact: true }).click();
+  payment = page.locator(".payment-record-table .data-row")
+    .filter({ hasText: "Jordan Ellis" })
+    .filter({ hasText: "Check" });
+  await expect(payment).toContainText("Check");
+  await payment.getByRole("button", { name: "Reverse" }).click();
+  dialog = page.getByRole("dialog");
+  await dialog.getByLabel("Reason").fill("Browser QA test waiver path");
+  await dialog.getByRole("button", { name: "Reverse payment" }).click();
+  await expect(page.getByText("Payment reversed and customer balance updated.")).toBeVisible();
+
+  await page.getByRole("tab", { name: "Credits" }).click();
+  charge = page.locator(".payment-record-table .data-row")
     .filter({ hasText: "Jordan Ellis" });
   await charge.getByRole("button", { name: "Waive" }).click();
   dialog = page.getByRole("dialog");
@@ -132,7 +156,7 @@ test("manager approves the daily service payment and sees persisted standing", a
   await page.reload();
   await page.getByRole("tab", { name: "Payments", exact: true }).click();
   await expect(page.locator(".payment-record-table .data-row")
-    .filter({ hasText: "Jordan Ellis" })).toContainText(/reversed/i);
+    .filter({ hasText: "Browser QA test waiver path" })).toContainText(/reversed/i);
 });
 
 test("manager generates payroll, records hours and tips, and locks the approved period", async ({ page }) => {

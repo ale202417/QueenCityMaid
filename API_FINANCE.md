@@ -13,6 +13,7 @@ Money is always integer cents. Dates use `YYYY-MM-DD`; timestamps require an exp
 | `GET` | `/customers/:customerId/ledger` | Charges, allocated payments, credits, and balances |
 | `POST` | `/customers/:customerId/charges` | Add a service, additional-work, or cancellation charge |
 | `POST` | `/customers/:customerId/payments` | Record a payment, allocate oldest charges first, credit any excess |
+| `POST` | `/charges/:id/payments` | Record a later payment against one selected unpaid charge |
 | `POST` | `/charges/:id/waive` | Waive an unpaid charge with a required reason |
 | `POST` | `/payments/:id/reverse` | Reverse a recorded payment and its allocations with a required reason |
 | `POST` | `/bookings/:bookingId/tips` | Record the booking's service tip and deterministic equal employee split |
@@ -65,6 +66,13 @@ POST /customers/:customerId/payments
   "reference": "optional"
 }
 ```
+
+`POST /charges/:id/payments` accepts the same body. It allocates only to the
+selected charge, so recording a later payment for a declined service cannot
+silently settle an older balance. Partial payments leave the remainder unpaid.
+Any excess becomes a customer credit, and a fully paid service is changed from
+declined to approved in the daily ledger. Repeating payment against a settled
+or waived charge returns `409 charge_not_payable`.
 
 ```json
 POST /bookings/:bookingId/tips

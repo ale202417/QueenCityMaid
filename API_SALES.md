@@ -81,7 +81,7 @@ Supported recurrence rules:
 { "type": "weekly", "intervalWeeks": 3 }
 { "type": "monthly", "dayOfMonth": 15 }
 { "type": "nth_weekday", "weekday": 1, "occurrence": 2 }
-{ "type": "individual_dates", "dates": ["2026-08-03", "2026-08-17"] }
+{ "type": "dates", "dates": ["2026-08-03", "2026-08-17"] }
 ```
 
 `weekday` uses `0` for Sunday through `6` for Saturday.
@@ -89,6 +89,14 @@ Supported recurrence rules:
 Creating or updating a recurring service keeps the customer's displayed
 frequency synchronized. Updating `startsOn` re-anchors the next occurrence;
 the flexible schedule reflects the new date immediately.
+
+Editing service details updates requested, confirmed, and assigned future
+visits while preserving started, completed, and otherwise historical work.
+Changing the recurrence, first date, preferred start time, or preferred crew
+cancels and detaches old future occurrences, releases their recurrence keys,
+and lets the schedule planner generate replacement visits from the edited plan.
+The update response includes `futureBookingsUpdated` and
+`futureBookingsCancelled` counts.
 
 ## Bookings
 

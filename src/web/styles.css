@@ -1426,7 +1426,7 @@ textarea:hover {
 }
 
 .recurring-plan-table .data-row {
-  grid-template-columns: minmax(145px, 1.1fr) minmax(170px, 1.3fr) minmax(130px, 1fr) 130px 80px minmax(130px, 0.9fr);
+  grid-template-columns: minmax(145px, 1.1fr) minmax(170px, 1.3fr) minmax(130px, 1fr) 130px 80px minmax(170px, 1fr);
 }
 
 .service-history-table .data-row {
@@ -2019,7 +2019,12 @@ textarea:hover {
 }
 
 .payment-record-table .data-row {
-  grid-template-columns: 105px minmax(150px, 1.1fr) minmax(170px, 1.3fr) 100px 110px 90px;
+  grid-template-columns: 105px minmax(150px, 1.1fr) minmax(170px, 1.3fr) 100px 110px minmax(150px, auto);
+}
+
+.recurring-plan-table .row-actions,
+.payment-record-table .row-actions {
+  flex-wrap: wrap;
 }
 
 .account-credit-table .data-row {

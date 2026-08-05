@@ -2039,6 +2039,7 @@ function PaymentsPage() {
               <PaymentRecordTable
                 rows={declinedRecords}
                 outstanding
+                onPay={(record) => setCorrectionModal({ type: "payment", record })}
                 onWaive={(record) => setCorrectionModal({ type: "waive", record })}
               />
             )}
@@ -2140,11 +2141,21 @@ function PaymentsPage() {
           />
         </Modal>
       )}
+      {correctionModal?.type === "payment" && (
+        <Modal title="Record payment" description={`${correctionModal.record.customerName} - ${money(correctionModal.record.amountCents)} outstanding`} onClose={() => setCorrectionModal(null)}>
+          <PaymentForm
+            charge={correctionModal.record}
+            customerId={correctionModal.record.customerId}
+            onCancel={() => setCorrectionModal(null)}
+            onSaved={() => finishCorrection("Payment recorded and customer balance updated.")}
+          />
+        </Modal>
+      )}
     </>
   );
 }
 
-function PaymentRecordTable({ rows, outstanding = false, onReverse, onWaive }) {
+function PaymentRecordTable({ rows, outstanding = false, onPay, onReverse, onWaive }) {
   return (
     <div className="data-table payment-record-table">
       <div className="data-row data-head"><span>Date</span><span>Customer</span><span>Service</span><span>Amount</span><span>{outstanding ? "Status" : "Method"}</span><span>Actions</span></div>
@@ -2152,7 +2163,7 @@ function PaymentRecordTable({ rows, outstanding = false, onReverse, onWaive }) {
         <article className="data-row" key={row.id || row.bookingId || `${row.customerId}-${row.date}-${index}`}>
           <div data-label="Date">{shortDate(row.date || row.serviceDate || row.chargedOn || row.paidAt)}</div>
           <div data-label="Customer"><strong>{row.customerName}</strong><small>{row.customerPhone || row.phone}</small></div>
-          <div data-label="Service"><strong>{row.serviceName || row.description}</strong><small>{row.address}</small></div>
+          <div data-label="Service"><strong>{row.serviceName || row.description || "Account payment"}</strong><small>{row.address}</small></div>
           <div data-label="Amount"><strong>{money(row.amountCents)}</strong></div>
           <div data-label={outstanding ? "Status" : "Method"}>
             {outstanding
@@ -2160,9 +2171,13 @@ function PaymentRecordTable({ rows, outstanding = false, onReverse, onWaive }) {
               : row.status === "reversed"
                 ? <StatusBadge status="reversed" />
                 : paymentMethodLabel(row.paymentMethod || row.method)}
+            {!outstanding && row.reference && <small>{row.reference}</small>}
             {row.reversalReason && <small>{row.reversalReason}</small>}
           </div>
           <div className="row-actions" data-label="Actions">
+            {outstanding && onPay && (
+              <button className="text-button" type="button" onClick={() => onPay(row)}>Record payment</button>
+            )}
             {outstanding && onWaive && (
               <button className="text-button danger-text" type="button" onClick={() => onWaive(row)}>Waive</button>
             )}
@@ -2358,8 +2373,13 @@ function ChargeForm({ customerId, onCancel, onSaved }) {
   );
 }
 
-function PaymentForm({ customerId, onCancel, onSaved }) {
-  const [form, setForm] = useState({ method: "zelle", amount: "", paidAt: localDateTime(new Date()), reference: "" });
+function PaymentForm({ charge, customerId, onCancel, onSaved }) {
+  const [form, setForm] = useState({
+    method: "zelle",
+    amount: charge ? (Number(charge.amountCents) / 100).toFixed(2) : "",
+    paidAt: localDateTime(new Date()),
+    reference: ""
+  });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   async function submit(event) {
@@ -2367,7 +2387,9 @@ function PaymentForm({ customerId, onCancel, onSaved }) {
     setSaving(true);
     setError("");
     try {
-      await api.post(`/customers/${customerId}/payments`, {
+      await api.post(charge
+        ? `/charges/${charge.id}/payments`
+        : `/customers/${customerId}/payments`, {
         method: form.method,
         amountCents: cents(form.amount),
         paidAt: new Date(form.paidAt).toISOString(),
@@ -2388,7 +2410,7 @@ function PaymentForm({ customerId, onCancel, onSaved }) {
             <option value="zelle">Zelle</option><option value="venmo">Venmo</option><option value="paypal">PayPal</option><option value="cash">Cash</option><option value="check">Check</option>
           </select>
         </Field>
-        <Field label="Amount"><input required min="0.01" step="0.01" type="number" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} /></Field>
+        <Field label="Amount"><input required max={charge ? Number(charge.amountCents) / 100 : undefined} min="0.01" step="0.01" type="number" value={form.amount} onChange={(event) => setForm({ ...form, amount: event.target.value })} /></Field>
         <Field label="Paid at"><input required type="datetime-local" value={form.paidAt} onChange={(event) => setForm({ ...form, paidAt: event.target.value })} /></Field>
         <Field label="Reference"><input maxLength="200" value={form.reference} onChange={(event) => setForm({ ...form, reference: event.target.value })} /></Field>
       </div>
@@ -3236,6 +3258,7 @@ function SchedulePage() {
           <RecurringPlans
             plans={resource.data?.recurringServices || []}
             status={planStatus}
+            onEdit={(planItem) => setModal({ type: "edit-plan", plan: planItem })}
             onEnd={(planItem) => planAction(planItem, "ended")}
             onPause={(planItem) => planAction(planItem, "paused")}
             onResume={(planItem) => setModal({ type: "resume-plan", plan: planItem })}
@@ -3286,6 +3309,16 @@ function SchedulePage() {
             initialDate={modal.date}
             onCancel={() => setModal(null)}
             onSaved={() => changed("Recurring service added.")}
+          />
+        </Modal>
+      )}
+      {modal?.type === "edit-plan" && (
+        <Modal title={`Edit plan - ${modal.plan.customerName}`} description="Update the service, frequency, preferred crew, timing, billing, or instructions." onClose={() => setModal(null)}>
+          <RecurringServiceForm
+            data={referenceData.data}
+            plan={modal.plan}
+            onCancel={() => setModal(null)}
+            onSaved={() => changed("Service plan and eligible future visits updated.")}
           />
         </Modal>
       )}
@@ -3596,6 +3629,7 @@ function OtherServices({
 function RecurringPlans({
   plans,
   status,
+  onEdit,
   onEnd,
   onPause,
   onResume,
@@ -3628,6 +3662,9 @@ function RecurringPlans({
               <span data-label="Preferred crew">{planItem.preferredTeamName || "Any available crew"}</span>
               <div data-label="Status"><StatusBadge status={planItem.status} /></div>
               <div className="row-actions" data-label="Actions">
+                {planItem.status !== "ended" && (
+                  <button className="text-button" type="button" onClick={() => onEdit(planItem)}>Edit</button>
+                )}
                 {planItem.status === "active" && (
                   <button className="text-button" type="button" onClick={() => onPause(planItem)}>Pause</button>
                 )}
@@ -3885,6 +3922,8 @@ function CustomerPropertyPicker({
   propertyId,
   initialCustomerSearch = "",
   initialPropertySearch = "",
+  lockCustomer = false,
+  customerName = "",
   onChange
 }) {
   const [customerSearch, setCustomerSearch] = useState(initialCustomerSearch);
@@ -3916,29 +3955,35 @@ function CustomerPropertyPicker({
 
   return (
     <>
-      <Field label="Find client">
-        <input
-          placeholder="Start typing a name, phone, or email"
-          type="search"
-          value={customerSearch}
-          onChange={(event) => setCustomerSearch(event.target.value)}
-        />
-      </Field>
-      <Field label="Client">
-        <select
-          required
-          value={customerId}
-          onChange={(event) => {
-            onChange({ customerId: event.target.value, propertyId: "" });
-            setPropertySearch("");
-          }}
-        >
-          <option value="">Select client</option>
-          {(customers.data?.customers || []).map((customer) => (
-            <option key={customer.id} value={customer.id}>{customer.name} - {customer.phone}</option>
-          ))}
-        </select>
-      </Field>
+      {lockCustomer ? (
+        <Field label="Client"><input readOnly value={customerName} /></Field>
+      ) : (
+        <>
+          <Field label="Find client">
+            <input
+              placeholder="Start typing a name, phone, or email"
+              type="search"
+              value={customerSearch}
+              onChange={(event) => setCustomerSearch(event.target.value)}
+            />
+          </Field>
+          <Field label="Client">
+            <select
+              required
+              value={customerId}
+              onChange={(event) => {
+                onChange({ customerId: event.target.value, propertyId: "" });
+                setPropertySearch("");
+              }}
+            >
+              <option value="">Select client</option>
+              {(customers.data?.customers || []).map((customer) => (
+                <option key={customer.id} value={customer.id}>{customer.name} - {customer.phone}</option>
+              ))}
+            </select>
+          </Field>
+        </>
+      )}
       {customerId && (
         <>
           <Field label="Find property">
@@ -4092,26 +4137,46 @@ function PlannerBookingForm({
   );
 }
 
-function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
+function RecurringServiceForm({ data, initialDate, plan, onCancel, onSaved }) {
   const serviceTypes = data?.serviceTypes || [];
   const teams = data?.teams || [];
+  const initialRule = plan?.recurrenceRule || {};
+  const initialFrequency = initialRule.type === "dates"
+    ? "individual_dates"
+    : initialRule.type === "weekly"
+      ? initialRule.intervalWeeks === 1
+        ? "weekly"
+        : initialRule.intervalWeeks === 2
+          ? "biweekly"
+          : "three_week"
+      : initialRule.type === "monthly"
+        ? "monthly_date"
+        : initialRule.type === "nth_weekday"
+          ? "nth_weekday"
+          : "biweekly";
   const [form, setForm] = useState({
-    customerId: "",
-    propertyId: "",
-    serviceTypeId: serviceTypes[0]?.id || "",
-    preferredTeamId: teams[0]?.id || "",
-    frequency: "biweekly",
-    startsOn: initialDate || localDate(),
-    preferredStartTime: "08:00",
-    expectedDurationMinutes: serviceTypes[0]?.defaultDurationMinutes || 150,
-    billingType: "flat",
-    amount: "",
-    dayOfMonth: "1",
-    occurrence: "1",
-    weekday: "1",
+    customerId: plan?.customerId || "",
+    propertyId: plan?.propertyId || "",
+    serviceTypeId: plan?.serviceTypeId || serviceTypes[0]?.id || "",
+    preferredTeamId: plan?.preferredTeamId || teams[0]?.id || "",
+    frequency: initialFrequency,
+    startsOn: String(plan?.startsOn || initialDate || localDate()).slice(0, 10),
+    preferredStartTime: String(plan?.preferredStartTime || "08:00").slice(0, 5),
+    expectedDurationMinutes: plan?.expectedDurationMinutes || serviceTypes[0]?.defaultDurationMinutes || 150,
+    billingType: plan?.billingType || "flat",
+    amount: plan
+      ? (Number(plan.billingType === "hourly" ? plan.billingRateCents : plan.priceCents) / 100).toFixed(2)
+      : "",
+    dayOfMonth: String(initialRule.dayOfMonth || 1),
+    occurrence: String(initialRule.occurrence || 1),
+    weekday: String(initialRule.weekday || 1),
     individualDate: initialDate || localDate(),
-    individualDates: initialDate ? [initialDate] : [],
-    specialInstructions: ""
+    individualDates: initialRule.type === "dates"
+      ? [...initialRule.dates]
+      : initialDate
+        ? [initialDate]
+        : [],
+    specialInstructions: plan?.specialInstructions || ""
   });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -4137,12 +4202,11 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
                 weekday: Number(form.weekday)
               };
     try {
-      await api.post("/recurring-services", {
+      const payload = {
         customerId: form.customerId,
         propertyId: form.propertyId,
         serviceTypeId: form.serviceTypeId,
         preferredTeamId: form.preferredTeamId || null,
-        status: "active",
         recurrenceRule,
         preferredStartTime: form.preferredStartTime,
         expectedDurationMinutes: Number(form.expectedDurationMinutes),
@@ -4155,7 +4219,12 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
         startsOn: form.frequency === "individual_dates"
           ? [...form.individualDates].sort()[0]
           : form.startsOn
-      });
+      };
+      if (plan) {
+        await api.patch(`/recurring-services/${plan.id}`, payload);
+      } else {
+        await api.post("/recurring-services", { ...payload, status: "active" });
+      }
       onSaved();
     } catch (requestError) {
       setError(errorMessage(requestError));
@@ -4170,6 +4239,10 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
         <CustomerPropertyPicker
           customerId={form.customerId}
           propertyId={form.propertyId}
+          customerName={plan?.customerName || ""}
+          initialCustomerSearch={plan?.customerName || ""}
+          initialPropertySearch={plan?.addressLine1 || ""}
+          lockCustomer={Boolean(plan)}
           onChange={(selection) => setForm((current) => ({ ...current, ...selection }))}
         />
         <Field label="Service">
@@ -4291,7 +4364,7 @@ function RecurringServiceForm({ data, initialDate, onCancel, onSaved }) {
         disabled={!form.propertyId || !form.serviceTypeId
           || (form.frequency === "individual_dates" && !form.individualDates.length)}
         onCancel={onCancel}
-        submitLabel="Add recurring service"
+        submitLabel={plan ? "Save plan" : "Add recurring service"}
       />
     </form>
   );

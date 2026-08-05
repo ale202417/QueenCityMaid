@@ -1232,10 +1232,12 @@ function recurringRoutes(router, pool) {
   router.patch("/recurring-services/:id", asyncRoute(async (req, res) => {
     const id = idParam(req);
     const input = validate(recurringUpdate, req.body);
-    const recurring = await transaction(pool, async client => {
+    const update = await transaction(pool, async client => {
       const before = await owned(
         client, "recurring_services", id, req.auth.organizationId, "Recurring service"
       );
+      let futureBookingsCancelled = 0;
+      let futureBookingsUpdated = 0;
       if (input.status === "active" && before.status !== "active") {
         if (before.status !== "paused") {
           throw new HttpError(409, "invalid_state", "Only a paused service plan can be resumed");
@@ -1285,12 +1287,13 @@ function recurringRoutes(router, pool) {
              )`,
           [req.auth.organizationId, id]
         );
-        await client.query(
+        const cancelled = await client.query(
           `UPDATE bookings
            SET status = 'cancelled', cancellation_reason = $3, updated_at = now()
            WHERE organization_id = $1 AND recurring_service_id = $2
              AND scheduled_start >= now()
-             AND status IN ('requested', 'confirmed', 'assigned')`,
+             AND status IN ('requested', 'confirmed', 'assigned')
+           RETURNING id`,
           [
             req.auth.organizationId,
             id,
@@ -1299,6 +1302,7 @@ function recurringRoutes(router, pool) {
               : "Recurring service ended"
           ]
         );
+        futureBookingsCancelled = cancelled.rowCount;
       }
       const merged = {
         customerId: input.customerId || before.customer_id,
@@ -1343,6 +1347,78 @@ function recurringRoutes(router, pool) {
          RETURNING *`,
         values
       );
+
+      const normalizedTime = (value) => value == null ? null : String(value).slice(0, 5);
+      const scheduleChanged = [
+        ["recurrenceRule", JSON.stringify(before.recurrence_rule), JSON.stringify(input.recurrenceRule)],
+        ["startsOn", databaseDateOnly(before.starts_on), input.startsOn],
+        ["preferredStartTime", normalizedTime(before.preferred_start_time), normalizedTime(input.preferredStartTime)],
+        ["preferredTeamId", before.preferred_team_id, input.preferredTeamId]
+      ].some(([key, previous, next]) => input[key] !== undefined && previous !== next);
+      if (scheduleChanged && !["paused", "ended"].includes(input.status)) {
+        const future = await client.query(
+          `SELECT id FROM bookings
+           WHERE organization_id = $1 AND recurring_service_id = $2
+             AND scheduled_start >= now()
+             AND status IN ('requested', 'confirmed', 'assigned')`,
+          [req.auth.organizationId, id]
+        );
+        for (const booking of future.rows) {
+          await detachBooking(client, req.auth.organizationId, booking.id);
+        }
+        await client.query(
+          `UPDATE notifications SET status = 'cancelled'
+           WHERE organization_id = $1 AND status = 'queued'
+             AND booking_id IN (
+               SELECT id FROM bookings
+               WHERE organization_id = $1 AND recurring_service_id = $2
+                 AND scheduled_start >= now()
+                 AND status IN ('requested', 'confirmed', 'assigned')
+             )`,
+          [req.auth.organizationId, id]
+        );
+        const cancelled = await client.query(
+          `UPDATE bookings
+           SET status = 'cancelled', cancellation_reason = 'Recurring service edited',
+               recurrence_due_date = NULL, updated_at = now()
+           WHERE organization_id = $1 AND recurring_service_id = $2
+             AND scheduled_start >= now()
+             AND status IN ('requested', 'confirmed', 'assigned')
+           RETURNING id`,
+          [req.auth.organizationId, id]
+        );
+        futureBookingsCancelled = cancelled.rowCount;
+      } else if (!["paused", "ended"].includes(input.status)) {
+        const bookingColumns = {
+          customerId: "customer_id",
+          propertyId: "property_id",
+          serviceTypeId: "service_type_id",
+          expectedDurationMinutes: "expected_duration_minutes",
+          priceCents: "price_cents",
+          billingType: "billing_type",
+          billingRateCents: "billing_rate_cents",
+          specialInstructions: "special_requests"
+        };
+        const bookingEntries = Object.entries(input).filter(([key]) => bookingColumns[key]);
+        if (bookingEntries.length) {
+          const bookingValues = bookingEntries.map(([, value]) => value);
+          const bookingSets = bookingEntries.map(
+            ([key], index) => `${bookingColumns[key]} = $${index + 1}`
+          );
+          bookingSets.push("updated_at = now()");
+          bookingValues.push(req.auth.organizationId, id);
+          const future = await client.query(
+            `UPDATE bookings SET ${bookingSets.join(", ")}
+             WHERE organization_id = $${bookingValues.length - 1}
+               AND recurring_service_id = $${bookingValues.length}
+               AND scheduled_start >= now()
+               AND status IN ('requested', 'confirmed', 'assigned')
+             RETURNING id`,
+            bookingValues
+          );
+          futureBookingsUpdated = future.rowCount;
+        }
+      }
       await client.query(
         `UPDATE customers SET service_frequency = $1, updated_at = now()
          WHERE id = $2 AND organization_id = $3`,
@@ -1364,12 +1440,20 @@ function recurringRoutes(router, pool) {
               : "update",
         before: apiRow(before), after: apiRow(result.rows[0])
       });
-      return result.rows[0];
+      return {
+        recurringService: result.rows[0],
+        futureBookingsCancelled,
+        futureBookingsUpdated
+      };
     });
     data(res, {
-      recurringService: apiRow(recurring),
+      recurringService: apiRow(update.recurringService),
+      futureBookingsCancelled: update.futureBookingsCancelled,
+      futureBookingsUpdated: update.futureBookingsUpdated,
       nextDates: validRecurrence(
-        databaseDateOnly(recurring.starts_on), recurring.recurrence_rule, 12
+        databaseDateOnly(update.recurringService.starts_on),
+        update.recurringService.recurrence_rule,
+        12
       )
     });
   }));

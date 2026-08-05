@@ -73,6 +73,25 @@ test("manager pauses, resumes, and ends a recurring service plan", async ({ page
   await page.getByRole("tab", { name: "Service plans" }).click();
 
   let row = page.locator(".recurring-plan-table .data-row").filter({ hasText: "Jordan Ellis" });
+  await row.getByRole("button", { name: "Edit", exact: true }).click();
+  let dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("Client")).toHaveValue("Jordan Ellis");
+  await dialog.locator("select").filter({ hasText: "Deep Cleaning" })
+    .selectOption({ label: "Deep Cleaning" });
+  await dialog.getByLabel("Frequency").selectOption("biweekly");
+  await dialog.getByLabel("First service").fill(nextMonday(new Date().toISOString().slice(0, 10)));
+  await dialog.getByRole("spinbutton", { name: "Flat fee", exact: true }).fill("245");
+  await dialog.getByLabel("Special instructions").fill("Edited through the service plan controls");
+  await dialog.getByRole("button", { name: "Save plan" }).click();
+  await expect(page.getByText("Service plan and eligible future visits updated.")).toBeVisible();
+  row = page.locator(".recurring-plan-table .data-row").filter({ hasText: "Jordan Ellis" });
+  await expect(row).toContainText("Deep Cleaning");
+  await expect(row).toContainText("Every 2 weeks");
+
+  await page.reload();
+  await page.getByRole("tab", { name: "Service plans" }).click();
+  row = page.locator(".recurring-plan-table .data-row").filter({ hasText: "Jordan Ellis" });
+  await expect(row).toContainText("Deep Cleaning");
   page.once("dialog", (confirmation) => confirmation.accept());
   await row.getByRole("button", { name: "Pause" }).click();
   await expect(page.getByText("Service plan paused.")).toBeVisible();
@@ -83,7 +102,7 @@ test("manager pauses, resumes, and ends a recurring service plan", async ({ page
   row = page.locator(".recurring-plan-table .data-row").filter({ hasText: "Jordan Ellis" });
   await expect(row).toContainText(/paused/i);
   await row.getByRole("button", { name: "Resume" }).click();
-  let dialog = page.getByRole("dialog");
+  dialog = page.getByRole("dialog");
   await dialog.getByRole("button", { name: "Resume plan" }).click();
   await expect(page.getByText("Service plan resumed from the selected date.")).toBeVisible();
 
