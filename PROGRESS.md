@@ -54,7 +54,7 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 | 46 | Charge-specific payment recording, allocation, validation, and audit history | 45 | done |
 | 47 | Editable recurring service plans with eligible future-visit synchronization | 45 | done |
 | 48 | Manager UI controls and API/browser regression verification | 46, 47 | done |
-| 49 | Production release, deployment verification, and external smoke checks | 48 | in_progress |
+| 49 | Production release, deployment verification, and external smoke checks | 48 | done |
 
 ## Decisions
 
@@ -277,6 +277,9 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   dependency audit: 0 known vulnerabilities after updating PostCSS to 8.5.25.
 - UTC-boundary simulation passes all 75 API tests and all 24 desktop/mobile
   browser workflows while using Queen City Maid's Charlotte workday.
+- GitHub CI run 16 passed for commit `4cecc48`. Render serves the verified
+  `assets/index-CtY7vIHs.js` release, and its external production smoke check
+  passes with the payment-collection and service-plan editing controls present.
 
 ## Definition of Done
 
