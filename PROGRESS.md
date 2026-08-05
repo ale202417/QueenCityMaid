@@ -150,6 +150,9 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
 - Editing a service plan updates the plan definition and eligible requested,
   confirmed, or assigned future visits. Started and historical visits remain
   unchanged.
+- Browser workday defaults use the Queen City Maid `America/New_York` timezone
+  instead of the manager device timezone, keeping routes, ledgers, and seeded
+  service dates aligned when UTC crosses midnight first.
 
 ## Verification
 
@@ -263,7 +266,7 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   `https://queen-city-maid-operations.onrender.com`.
 - Selected past-due charges accept full or partial later payments without
   allocating another charge first; duplicate, permission, organization, credit,
-  outstanding-balance, and audit cases pass. Full API suite: 74 passing tests.
+  outstanding-balance, and audit cases pass. Full API suite: 75 passing tests.
 - Active and paused service plans expose a complete edit form. Detail changes
   update eligible future visits, schedule changes release and regenerate future
   occurrences, and completed history remains immutable.
@@ -272,6 +275,8 @@ Status values: `todo`, `in_progress`, `done`, `blocked`.
   and the existing desktop/mobile role coverage.
 - Real PostgreSQL previous-release upgrade and production build pass. Production
   dependency audit: 0 known vulnerabilities after updating PostCSS to 8.5.25.
+- UTC-boundary simulation passes all 75 API tests and all 24 desktop/mobile
+  browser workflows while using Queen City Maid's Charlotte workday.
 
 ## Definition of Done
 

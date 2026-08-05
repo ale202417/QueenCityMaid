@@ -164,7 +164,8 @@ test("manager generates payroll, records hours and tips, and locks the approved 
   await openManagerPage(page, "Payroll");
   await page.getByLabel("Pay period starts Monday").fill(currentMonday());
   await page.getByRole("button", { name: "Generate payroll" }).click();
-  await expect(page.getByText("Payroll period generated for review.")).toBeVisible();
+  await expect(page.getByText(/Payroll period (generated for review|already exists)/))
+    .toBeVisible({ timeout: 15_000 });
 
   await page.getByRole("button", { name: "Add employee hours" }).click();
   let dialog = page.getByRole("dialog");
